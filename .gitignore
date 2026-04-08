@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Large data files — store externally (Globus / local copy only)
+data/bps_output.h5
+data/SNR_Grid_IMRPhenomPv2_FD_all_noise.hdf5
+data/sspc/
+data/*.hdf5
+data/*.h5
+data/*.tar.gz
+
+# Generated ML artifacts
+checkpoints/*.pt
+checkpoints/*.pkl
+checkpoints/*.json
+checkpoints/*.png
+
+# Generated datasets
+data/*.parquet
+data/*.csv
+data/*.json
+
+# SLURM logs
+logs/
+*.out
+*.err
+
+# Plots (regenerated each run)
+plots/cfm_smoke_test/
+plots/diffusion_smoke_test/
+plots/rate_network/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
