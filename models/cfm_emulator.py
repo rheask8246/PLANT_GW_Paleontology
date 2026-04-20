@@ -59,13 +59,16 @@ def denormalize_obs(obs: np.ndarray, normalizer: Dict, columns: list = None) -> 
 class EventEncoder(nn.Module):
     """Encodes the conditioning variable Λ into a context vector."""
 
-    def __init__(self, input_dim: int = 7, hidden_dim: int = 128, output_dim: int = 128):
+    def __init__(self, input_dim: int = 7, hidden_dim: int = 128, output_dim: int = 128,
+                 dropout: float = 0.05):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim),
         )
 
@@ -76,19 +79,22 @@ class EventEncoder(nn.Module):
 class VectorFieldNet(nn.Module):
     """The learned vector field for the flow: predicts dx/dt."""
 
-    def __init__(self, context_dim: int = 128, hidden_dim: int = 256):
+    def __init__(self, context_dim: int = 128, hidden_dim: int = 256, dropout: float = 0.1):
         super().__init__()
         self.input_dim = 4 + 1 + context_dim  # x(4) + t(1) + context
         self.net = nn.Sequential(
             nn.Linear(self.input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, 4),
         )
 

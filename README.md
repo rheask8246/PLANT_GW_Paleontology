@@ -79,33 +79,36 @@ python 04b_diffusion_emulator.py --smoke-test --steps 500
 
 ### Step 00 — SSPC Data Generation (`00_sspc_data_generation.py`)
 
-**What it does:** Performs cosmic integration of Binary Population Synthesis (BPS) output over star formation history and metallicity evolution (Madau-Dickinson / Neijssel+19 models) to produce a grid of predicted GW merger event catalogs.
+**What it does:** Performs cosmic integration of Binary Population Synthesis (BPS) output over star formation history and metallicity evolution (Madau-Dickinson / Neijssel+19 models) to produce a grid of predicted GW merger event catalogs representing the **intrinsic** population — no detection-probability weighting is applied.
 
 **Input:**
 - `data/bps_output.h5` — COMPAS/GROWL BPS simulation output (3.35M binaries) with columns: `m1`, `m2`, `t_delay`, `metallicity`, `channel` (SMT/CE/CHE).
-- `data/SNR_Grid_IMRPhenomPv2_FD_all_noise.hdf5` — pre-computed SNR grid for O3 sensitivity.
 
 **Output:** `data/sspc/models_sspc.hdf5` — HDF5 file with keys `/CHANNEL/sfra{NNNN}/mu0{MMMM}`.  
 Each key contains a DataFrame with columns: `mchirp`, `q`, `chieff`, `z`, `weight`.
 
-**Parameters scanned:**
+**Parameters scanned (centred on TNG100-1 best-fit values from Briel+):**
 
-| Parameter | Symbol | Range | Description |
-|-----------|--------|-------|-------------|
-| SFR amplitude | `sfr_a` | 0.008 – 0.035 | Madau-Dickinson aSF (M☉/yr/Mpc³) |
-| Mean metallicity (z=0) | `mu0` | 0.005 – 0.065 | Log-skew-normal μ₀ |
-| SFR peak redshift | `sfr_c` | 2.0 – 5.5 | (nuisance, sampled per grid point) |
-| SFR high-z slope | `sfr_d` | 4.7 – 5.7 | (nuisance) |
-| Metallicity evo. | `muz` | −0.5 – 0.1 | Redshift scaling of μ (nuisance) |
-| Metallicity spread | `sigma0` | 0.3 – 0.7 | Log-normal σ (nuisance) |
+| Parameter | Symbol | Range | TNG100-1 best-fit | Grid type |
+|-----------|--------|-------|-------------------|-----------|
+| SFR amplitude | `sfr_a` | 0.010 – 0.030 | ≈ 0.017 | **primary axis** |
+| Mean metallicity (z=0) | `mu0` | 0.010 – 0.060 | ≈ 0.025 | **primary axis** |
+| SFR rising slope | `sfr_b` | 1.0 – 3.0 | ≈ 1.46 | nuisance (random draw) |
+| SFR turnover redshift | `sfr_c` | 2.0 – 6.0 | ≈ 4.51 | nuisance |
+| SFR falling slope | `sfr_d` | 4.0 – 8.0 | ≈ 6.21 | nuisance |
+| Metallicity evo. slope | `muz` | −0.5 – 0.1 | ≈ −0.052 | nuisance |
+| Metallicity log-spread | `sigma0` | 0.5 – 1.5 | ≈ 1.15 | nuisance |
+| Spread redshift evo. | `sigmaz` | −0.1 – 0.1 | ≈ 0.047 | nuisance |
+| Log-skew skewness | `alpha_skew` | −2.0 – 2.0 | ≈ −1.85 | nuisance |
 
 **Grid size:** `--n-sfra` × `--n-mu0` grid points × 3 channels (SMT, CE, CHE).  
 Full run: 50 × 50 × 3 = 7,500 grid points × 50,000 events ≈ 375M events total.
 
 **Key design:**
-- Events are sampled from the *detection-weighted* population (`det_weight = weight × pdet`) so all generated events are detectable.
-- `z` values are clipped to `[0.1, 1.5]` (first physical redshift bin onwards).
-- `chieff` drawn from channel-dependent Gaussians: SMT ~ N(0, 0.1), CE ~ N(0, 0.2), CHE ~ N(0, 0.25).
+- Events are sampled from the **intrinsic merger-rate distribution** (no pdet cut). All mergers across all redshifts z = 0.1 – 10 are included, weighted by the physical merger rate at each redshift.
+- `weight` column = per-binary intrinsic merger rate [merger/yr/binary] at the drawn z.
+- `z` values clipped to ≥ 0.1 to avoid log10(0) issues.
+- `chieff` drawn from channel-dependent Gaussians (no spin info in BPS): CE ~ N(0, 0.10), CHE ~ N(0.25, 0.15), SMT ~ N(0.05, 0.12).
 
 ---
 
@@ -174,6 +177,92 @@ Full run: 50 × 50 × 3 = 7,500 grid points × 50,000 events ≈ 375M events tot
 
 ---
 
+---
+
+### Analysis — BBH Mass Distribution (`data_distribution_analysis.py`)
+
+**What it does:** Reproduces Figure 5 of Briel et al. (Fit_SFRD_TNG paper) and overplots SSPC-generated data for direct comparison. Shows the redshift evolution of the BBH primary-mass distribution dR/dm₁ across three formation channels at merger redshifts z = 0.1 – 0.5.
+
+**Input:**
+- `data/sspc/models_sspc.hdf5` — SSPC event catalogs (right column)
+- `../Fit_SFRD_TNG/data/Rate_info.h5` — TNG100-1 intrinsic merger rate (left column; optional)
+- `../Fit_SFRD_TNG/data/COMPAS_Output_wWeights.h5` — COMPAS DCO table (optional)
+- `../Fit_SFRD_TNG/data/BBHMassSpinRedshift_BSplineIID.h5` — GWTC-4 B-Spline overlay (optional, requires `popsummary`)
+
+**Output:** `plots/data_distribution_analysis.png`
+
+**Figure layout:**
+
+| Row | Channel |
+|-----|---------|
+| 0 | All channels (stable + CE, CHE excluded — matching original Fig. 5) |
+| 1 | Stable mass-transfer (SMT) only |
+| 2 | Common-envelope (CE) only |
+
+- **Left column**: TNG100-1 intrinsic rate [Gpc⁻³ yr⁻¹ M☉⁻¹] — reproduced from the reference figure
+- **Right column**: SSPC intrinsic merger-rate dN/dm₁ aggregated across all grid points, area-normalised per z-slice for shape comparison
+- Gray band: GWTC-4 B-Spline posterior (from `popsummary`)
+- Colors: `rocket_r` colormap, darkest = z=0.1, lightest = z=0.5
+
+**Note on z range:** The SSPC data now spans z = 0.1 – 10 (intrinsic rate, no detection cut). TNG data in `Rate_info.h5` covers z ≤ 0.45. The original paper uses z up to 8, which requires a full TNG simulation run.
+
+**Usage:**
+```bash
+python data_distribution_analysis.py
+
+# With custom paths
+python data_distribution_analysis.py \
+  --tng-data-dir /path/to/Fit_SFRD_TNG/data \
+  --sspc-hdf5 data/sspc/models_sspc.hdf5 \
+  --output plots/my_comparison.png
+```
+
+---
+
+### Intrinsic data validation (`test/validation/run_data_validation.py`)
+
+**What it does:** After `02_build_dataset.py`, this script checks that the **intrinsic** training data (full event range, not detection-weighted) is consistent and usable. It reads `all_events.parquet` by default and does **not** filter on detectability or use `all_detected_events.parquet` for these checks.
+
+**Checks (summary):**
+
+| Check | Purpose |
+|-------|---------|
+| **Grid coverage** | `lambda_*` ranges, CE occupancy in `(chi_b, alpha_CE)` space, optional coverage plots |
+| **Channel health** | Per-channel grid counts and intrinsic `sum_weight` / `log_efficiency` from `hyperparam_table.csv` |
+| **Event validity** | NaNs, physical bounds on `mchirp`, `q`, `chieff`, `z`; `weight` is optional (if absent, weight checks are skipped) |
+| **Split hygiene** | No overlapping `grid_idx` across train/val/test; nearest train–test distance in λ-space |
+| **Rare regions** | Flags low-intrinsic-rate grid points (default: bottom 5% of `sum_weight`) |
+| **Distribution sanity** | Train vs test KL / KS / MMD on observables; redshift shape by `channel_id` |
+
+**Outputs:**
+
+- `test/reports/validation/validation_summary.json` — machine-readable pass/warn/fail per check  
+- `test/reports/validation/validation_summary.md` — short table  
+- `test/reports/validation/*.csv` — e.g. channel summary, rare-event flags, violations sample  
+- `test/plots/validation/*.png` — heatmaps, histograms, CDFs  
+
+**When to run:** After Step 02 (same directory as `hyperparam_table.csv`, `hyperparam_table_encoded.csv`, `splits.json`, `all_events.parquet`).
+
+**How to run:**
+
+```bash
+cd PLANT_GW_Paleontology
+source ../venv/bin/activate   # or your venv
+
+python test/validation/run_data_validation.py
+```
+
+**Options:**
+
+| Flag | Meaning |
+|------|---------|
+| `--project-root PATH` | Root directory (default: parent of `test/validation/`) |
+| `--events-parquet PATH` | Override path to intrinsic events (default: `all_events.parquet` under project root) |
+| `--rare-quantile FLOAT` | Quantile for “rare” intrinsic grids (default: `0.05`) |
+| `--strict` | Exit with code 1 if any check is **warn** or **fail** (for CI / batch jobs) |
+
+---
+
 ## File structure
 
 ```
@@ -183,7 +272,13 @@ PLANT_GW_Paleontology/
 ├── 03_rate_network.py           # Step 03: rate MLP
 ├── 04_cfm_emulator.py           # Step 04: CFM emulator
 ├── 04b_diffusion_emulator.py    # Step 04b: Diffusion emulator
-├── selection_effects.py         # pdet computation (SNR grid)
+├── data_distribution_analysis.py  # Figure 5 comparison (TNG vs SSPC mass dist.)
+├── selection_effects.py         # pdet computation (SNR grid; used by analysis scripts only)
+├── test/
+│   ├── validation/
+│   │   └── run_data_validation.py   # Intrinsic data validation (after Step 02)
+│   ├── reports/validation/          # validation_summary.json, .md, CSVs (generated)
+│   └── plots/validation/            # validation plots (generated)
 ├── requirements.txt
 ├── slurm/
 │   ├── 00_data_gen.sh
@@ -194,7 +289,6 @@ PLANT_GW_Paleontology/
 │   └── smoke_test.sh
 ├── data/
 │   ├── bps_output.h5                              # BPS input (COMPAS/GROWL)
-│   ├── SNR_Grid_IMRPhenomPv2_FD_all_noise.hdf5    # pdet SNR grid (O3)
 │   └── sspc/
 │       └── models_sspc.hdf5                       # generated event catalogs
 ├── checkpoints/

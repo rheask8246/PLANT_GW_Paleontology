@@ -1,0 +1,234 @@
+{
+  "overall_status": "warn",
+  "n_checks": 6,
+  "checks": [
+    {
+      "name": "grid_coverage",
+      "status": "warn",
+      "notes": [
+        "Low CE occupancy fraction: 0.177"
+      ],
+      "lambda_stats": {
+        "lambda_0": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 2
+        },
+        "lambda_1": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 2
+        },
+        "lambda_2": {
+          "min": 0.0,
+          "max": 0.0,
+          "n_unique": 1
+        },
+        "lambda_3": {
+          "min": 0.0,
+          "max": 0.0,
+          "n_unique": 1
+        },
+        "lambda_4": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 2
+        },
+        "lambda_5": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 8
+        },
+        "lambda_6": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 8
+        },
+        "lambda_7": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 8
+        },
+        "lambda_8": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 192
+        },
+        "lambda_9": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 192
+        },
+        "lambda_10": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 192
+        },
+        "lambda_11": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 8
+        },
+        "lambda_12": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 192
+        },
+        "lambda_13": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 192
+        },
+        "lambda_14": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 192
+        },
+        "lambda_15": {
+          "min": 0.0,
+          "max": 1.0,
+          "n_unique": 192
+        }
+      },
+      "ce_occupancy_fraction": 0.1772853185595568
+    },
+    {
+      "name": "channel_health",
+      "status": "pass",
+      "notes": [],
+      "channels": [
+        {
+          "channel": "CE",
+          "n_grid": 64,
+          "sum_weight_total": 268588.60663442104,
+          "sum_weight_median": 1170.9764404296875,
+          "log_eff_mean": -2.388786385112531
+        },
+        {
+          "channel": "CHE",
+          "n_grid": 64,
+          "sum_weight_total": 102458.33854439443,
+          "sum_weight_median": 584.0702514648438,
+          "log_eff_mean": -2.1461950258170512
+        },
+        {
+          "channel": "SMT",
+          "n_grid": 64,
+          "sum_weight_total": 306578.30972493946,
+          "sum_weight_median": 2976.50732421875,
+          "log_eff_mean": -1.5469868095793642
+        }
+      ]
+    },
+    {
+      "name": "event_validity",
+      "status": "pass",
+      "notes": [
+        "Optional column 'weight' missing; skipped weight-bound checks."
+      ],
+      "violations": {
+        "nan_or_inf_mchirp": 0,
+        "nan_or_inf_q": 0,
+        "nan_or_inf_chieff": 0,
+        "nan_or_inf_z": 0,
+        "mchirp_nonpositive": 0,
+        "q_out_of_bounds": 0,
+        "chieff_out_of_bounds": 0,
+        "z_negative": 0
+      },
+      "quantiles": {
+        "mchirp": {
+          "p001": 3.7154901027679443,
+          "p50": 9.152164459228516,
+          "p999": 34.01327995681904
+        },
+        "q": {
+          "p001": 0.16608692705631256,
+          "p50": 0.5773728489875793,
+          "p999": 0.9996054172515869
+        },
+        "chieff": {
+          "p001": -0.3041444500982761,
+          "p50": 0.07787097245454788,
+          "p999": 0.6611846991181619
+        },
+        "z": {
+          "p001": 0.10000000149011612,
+          "p50": 0.10000000149011612,
+          "p999": 0.6000000238418579
+        }
+      }
+    },
+    {
+      "name": "split_hygiene",
+      "status": "pass",
+      "notes": [],
+      "overlaps": {
+        "train_val": 0,
+        "train_test": 0,
+        "val_test": 0
+      },
+      "n_missing_idx": 0,
+      "n_extra_idx": 0,
+      "test_to_train_lambda_distance": {
+        "min": 0.36723758337335377,
+        "median": 0.7511895149608867,
+        "max": 1.016425327031991
+      }
+    },
+    {
+      "name": "rare_event_diagnostics",
+      "status": "pass",
+      "notes": [],
+      "rare_threshold_sum_weight": 1.117105406522751,
+      "n_rare_grid": 10,
+      "rare_fraction": 0.052083333333333336,
+      "rare_by_channel": {
+        "CE": 4,
+        "SMT": 3,
+        "CHE": 3
+      }
+    },
+    {
+      "name": "distribution_sanity",
+      "status": "pass",
+      "notes": [],
+      "metrics": [
+        {
+          "observable": "mchirp",
+          "kl_train_test": 0.2348515385735594,
+          "ks_train_test": 0.105125,
+          "mmd2_train_test": 0.005211522785260492
+        },
+        {
+          "observable": "q",
+          "kl_train_test": 0.14350748723033285,
+          "ks_train_test": 0.1185,
+          "mmd2_train_test": 0.010561514111986359
+        },
+        {
+          "observable": "chieff",
+          "kl_train_test": 0.02832838442280652,
+          "ks_train_test": 0.028,
+          "mmd2_train_test": 0.0006779894932931185
+        },
+        {
+          "observable": "z",
+          "kl_train_test": 0.01071046310870339,
+          "ks_train_test": 0.04475,
+          "mmd2_train_test": 0.0028442355606947967
+        }
+      ]
+    }
+  ],
+  "inputs": {
+    "hyperparam_csv": "/Users/rheasenthilkumar/Documents/UCSD/Research/GW_Paleontology/PLANT_GW_Paleontology/hyperparam_table.csv",
+    "hyperparam_encoded_csv": "/Users/rheasenthilkumar/Documents/UCSD/Research/GW_Paleontology/PLANT_GW_Paleontology/hyperparam_table_encoded.csv",
+    "splits_json": "/Users/rheasenthilkumar/Documents/UCSD/Research/GW_Paleontology/PLANT_GW_Paleontology/splits.json",
+    "events_parquet": "/Users/rheasenthilkumar/Documents/UCSD/Research/GW_Paleontology/PLANT_GW_Paleontology/all_events.parquet"
+  },
+  "output_dirs": {
+    "report_dir": "/Users/rheasenthilkumar/Documents/UCSD/Research/GW_Paleontology/PLANT_GW_Paleontology/test/reports/validation",
+    "plot_dir": "/Users/rheasenthilkumar/Documents/UCSD/Research/GW_Paleontology/PLANT_GW_Paleontology/test/plots/validation"
+  }
+}

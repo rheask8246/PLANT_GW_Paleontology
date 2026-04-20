@@ -131,8 +131,14 @@ def run_smoke_test(device: str = "cpu", steps: int = 500) -> None:
     val_idx = splits["val"]
     test_idx = splits["test"]
 
+    # Importance weights: floor at 1% of median to prevent near-zero sum_pdet points
+    # (e.g., undetectable CHE combos with sum_pdet ~ 1e-6) from dominating sampling.
+    # Without this floor, one degenerate point gets ~100% sampling probability and
+    # importance_ratio ≈ 0, giving zero gradient — train loss collapses to 0 trivially.
     sum_pdet = hp_df["sum_pdet"].values
-    w = 1.0 / (sum_pdet + 1e-6)
+    pdet_floor = max(float(np.median(sum_pdet)) * 0.01, 1e-4)
+    sum_pdet_clipped = np.maximum(sum_pdet, pdet_floor)
+    w = 1.0 / sum_pdet_clipped
     w = w / w.sum()
     n_grid = len(hp_df)
     p_uniform = 1.0 / n_grid
@@ -201,7 +207,7 @@ def run_smoke_test(device: str = "cpu", steps: int = 500) -> None:
                 total_norm += p.grad.data.norm(2).item() ** 2
         grad_norms.append(total_norm ** 0.5)
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
         scheduler.step()
 

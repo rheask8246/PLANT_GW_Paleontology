@@ -56,8 +56,8 @@ CHI_B_RANGE    = (0.0,  0.5)
 ALPHA_CE_RANGE = (0.2,  5.0)
 
 # ── SSPC normalization ranges (sfr_a × mu0 grid) ─────────────────────────────
-SSPC_SFRA_RANGE = (0.008, 0.035)   # Madau-Dickinson SFR amplitude (matches 00_sspc_data_generation.py)
-SSPC_MU0_RANGE  = (0.005, 0.065)   # mean metallicity at z=0       (matches 00_sspc_data_generation.py)
+SSPC_SFRA_RANGE = (0.010, 0.030)   # Madau-Dickinson SFR amplitude (matches 00_sspc_data_generation.py)
+SSPC_MU0_RANGE  = (0.010, 0.060)   # mean metallicity at z=0       (matches 00_sspc_data_generation.py)
 
 CHANNEL_TO_ID = {"CE": 0, "CHE": 1, "GC": 2, "NSC": 3, "SMT": 4}
 CHANNEL_NAMES = {0: "CE", 1: "CHE", 2: "GC", 3: "NSC", 4: "SMT"}
@@ -175,11 +175,10 @@ def build_hyperparam_table(hdf5_path: Path, data_source: str = "auto") -> pd.Dat
         w_eff = np.asarray(weight * pdet, dtype=np.float64)
         w_eff_sum = float(np.sum(w_eff))
 
-        # For SSPC data weight = det_weight[ev_idx] ∝ sfr_a × h(mu0), which gives
-        # a rate target that varies strongly across the grid (>1 dex).  For Zenodo
-        # data sum(pdet) is the conventional target.
+        # For SSPC data (intrinsic, pdet-free): use sum of intrinsic merger-rate
+        # weights as the rate target.  For Zenodo data sum(pdet) is conventional.
         if data_source == "sspc":
-            sum_pdet = sum_weight      # use det_weight sum as rate target
+            sum_pdet = sum_weight      # intrinsic merger rate total
         else:
             sum_pdet = sum_pdet_raw    # keep original Zenodo behavior
 
