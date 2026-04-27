@@ -1,20 +1,42 @@
-torch
-torchcfm
-torchdiffeq
-sbi
-numpy
-scipy
-scikit-learn
-joblib
-astropy
-pandas
-pyarrow
-matplotlib
-h5py
-jupyterlab
-emcee
-seaborn
-omegaconf
-tensorboard
-pot
-corner
+# -----------------------------------------------------------------------------
+# Python >= 3.10 is required (torchcfm needs torch>=~1.11 and pandas>=2.2).
+# On ACCESS Expanse, do NOT use the default Python 3.6 login-node python:
+#   module avail python
+#   module load cpu   # or gpu
+#   module load python/3.11.5  # use any 3.10+ offered on the system
+# Then: python3 -m venv .venv && source .venv/bin/activate
+#       pip install -U pip setuptools wheel
+#
+# For GPU jobs (Steps 04 / 05), install a CUDA build of PyTorch *before* the rest,
+# or install everything in one go on a machine where `pip install torch` resolves
+# to a recent wheel (see README / Expanse section).
+# Example (CUDA 12.1 wheels — adjust URL to match Expanse & pytorch.org):
+#   pip install "torch>=2.1,<2.6" torchvision --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements.txt
+# -----------------------------------------------------------------------------
+
+torch>=2.1.0,<2.6.0
+torchcfm>=1.0.5,<1.1.0
+torchdyn>=1.0.6,<1.1.0
+torchdiffeq>=0.2.0
+absl-py>=1.0.0
+numpy>=1.24.0,<3
+scipy>=1.10.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+astropy>=5.0
+pandas>=2.2.2,<3
+pyarrow>=14.0.0
+matplotlib>=3.7.0
+h5py>=3.8.0
+jupyterlab>=4.0.0
+seaborn>=0.13.0
+omegaconf>=2.3.0
+tensorboard>=2.14.0
+POT>=0.9.0
+corner>=2.2.0
+emcee>=3.1.0
+
+# Optional: simulation-based inference stack (not imported by core PLANT scripts).
+# Uncomment if you need it; may add extra resolver constraints.
+# sbi>=0.22.0

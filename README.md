@@ -54,19 +54,37 @@ This repository is a **software pipeline** that helps scientists ask: *When pair
 
 ### One-time setup on Expanse
 
+**Python version:** this project needs **Python 3.10 or newer** (because `torchcfm` pins `pandas>=2.2.2` and modern `torch`). The login node’s default `python3` is often **3.6**; that leads to `pip` downloading ancient `torch` wheels and a **ResolutionImpossible** conflict with `torchcfm`. Run `module avail python` and load a **3.10+** module before creating the venv.
+
 ```bash
 ssh <user>@login.expanse.sdsc.edu
 cd /expanse/lustre/scratch/$USER/temp_project
 git clone <repo> PLANT_GW_Paleontology && cd PLANT_GW_Paleontology
 
-module load cpu
+module purge
+module load cpu    # or gpu — follow site guidance
+module load python/default  # if offered; otherwise e.g. module load python/3.11.5
+
+python3 --version   # must show 3.10.x or newer
+
 python3 -m venv .venv && source .venv/bin/activate
+pip install -U pip setuptools wheel
+
+# Recommended on GPU nodes: install PyTorch with CUDA first (pick cu121 vs cu124 from pytorch.org for your stack)
+pip install "torch>=2.1,<2.6" torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# Remaining deps (torch line in requirements.txt will usually be satisfied already)
 pip install -r requirements.txt
+
+# Optional SBI stack only if you need it
+# pip install -r requirements-optional.txt
 
 mkdir -p logs
 ```
 
-Edit `slurm/*.sh` and replace `<<PROJECT>>` with your ACCESS allocation ID (find it with `expanse-client user`).
+If you only train on **CPU** in this venv, you can use `pip install "torch>=2.1,<2.6" torchvision --index-url https://download.pytorch.org/whl/cpu` instead of the CUDA URL, then `pip install -r requirements.txt`.
+
+Edit `slurm/*.sh` and replace `<<PROJECT>>` with your ACCESS allocation ID (find it with `expanse-client user`). Ensure batch scripts `module load` the **same** Python you used for the venv, or use a venv built with the cluster’s intended interpreter.
 
 ### Full pipeline execution (in order)
 
@@ -679,6 +697,7 @@ PLANT_GW_Paleontology/
 │   ├── reports/validation/          # validation_summary.json, .md, CSVs (timestamped subdirs)
 │   └── plots/validation/            # validation plots (timestamped subdirs)
 ├── requirements.txt
+├── requirements-optional.txt  # e.g. sbi (not used by core pipeline scripts)
 ├── slurm/
 │   ├── 00_data_gen.sh
 │   ├── 02_build_dataset.sh
