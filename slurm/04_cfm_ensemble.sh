@@ -8,7 +8,7 @@
 #SBATCH --gpus=1
 #SBATCH --mem=96G
 #SBATCH --time=24:00:00
-#SBATCH --account=<<PROJECT>>
+#SBATCH --account=PHY260100
 #SBATCH --no-requeue
 #SBATCH --array=1-3
 #SBATCH --export=ALL
@@ -20,9 +20,12 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 mkdir -p logs
 
+CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
+source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+conda activate plant
+
 module purge
 module load gpu
-source .venv/bin/activate
 
 i="${SLURM_ARRAY_TASK_ID}"
 SEED=$((1000 + i * 17))

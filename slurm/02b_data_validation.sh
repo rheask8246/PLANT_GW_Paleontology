@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
 #SBATCH --time=04:00:00
-#SBATCH --account=<<PROJECT>>
+#SBATCH --account=PHY260100
 #SBATCH --export=ALL
 
 # Full-parquet intrinsic validation (CPU). Timestamped under test/reports/validation/ and test/plots/validation/ by default.
@@ -19,6 +19,8 @@ mkdir -p logs
 
 module purge
 module load cpu
-source .venv/bin/activate
+CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
+source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+conda activate plant
 
 python test/validation/run_data_validation.py

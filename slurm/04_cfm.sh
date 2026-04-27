@@ -8,7 +8,7 @@
 #SBATCH --gpus=1
 #SBATCH --mem=96G
 #SBATCH --time=24:00:00
-#SBATCH --account=<<PROJECT>>
+#SBATCH --account=PHY260100
 #SBATCH --no-requeue
 #SBATCH --export=ALL
 
@@ -17,9 +17,15 @@
 # ~12–20 h wall-time depending on grid size.
 # Output: checkpoints/cfm_final.pt + plots/cfm_smoke_test/<date>/
 
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
+mkdir -p logs
+
+CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
+source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+conda activate plant
+
 module purge
 module load gpu
-source .venv/bin/activate
 
 python 04_cfm_emulator.py \
     --steps 100000 \

@@ -7,16 +7,22 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --mem=16G
 #SBATCH --time=01:00:00
-#SBATCH --account=<<PROJECT>>
+#SBATCH --account=PHY260100
 #SBATCH --export=ALL
 
 # Usage: sbatch slurm/03_rate_network.sh
 # Trains the rate network (MLP regressing log10(sum_weight) from hyperparams).
 # CPU-only; ~20–40 min wall-time.
 
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
+mkdir -p logs
+
+CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
+source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+conda activate plant
+
 module purge
 module load cpu
-source .venv/bin/activate
 
 python 03_rate_network.py \
     --epochs 2000 \

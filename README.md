@@ -52,43 +52,87 @@ This repository is a **software pipeline** that helps scientists ask: *When pair
 
 [ACCESS Expanse](https://www.sdsc.edu/services/hpc/expanse/) is a **shared research supercomputer** at SDSC. **SLURM** is the software that decides *when* and *on which computer nodes* your job runs. The commands like `sbatch` below are simply **“please run this script on the cluster when you can, using the time limits and memory I asked for.”** You do not need to know SLURM details if you are only following the *meaning* of the pipeline above—this section is for people who will actually press “submit job.”
 
-### One-time setup on Expanse
+### One-time setup on ACCESS Expanse
 
-**Python version:** this project needs **Python 3.10 or newer** (because `torchcfm` pins `pandas>=2.2.2` and modern `torch`). The login node’s default `python3` is often **3.6**; that leads to `pip` downloading ancient `torch` wheels and a **ResolutionImpossible** conflict with `torchcfm`. Run `module avail python` and load a **3.10+** module before creating the venv.
+**Python version:** this project needs **Python 3.10 or newer** (`torchcfm` / `pandas>=2.2.2`). The login node’s **`python3` from `/cm/local` (often 3.6)** and **`python37` (3.7)** are **not** enough for `pip install -r requirements.txt`.
+
+This repository’s `slurm/*.sh` files are **pre-configured** for:
+
+- **`#SBATCH --account=PHY260100`** — ACCESS award **PHY260100** (*Neural Population Inference for Gravitational Wave Astrophysics via Conditional Flow Matching*). If the scheduler rejects the job, confirm the exact charge string with `expanse-client user` (sometimes case or suffix differs).
+- **Conda env `plant`** with Miniconda installed under **`$HOME/miniconda3`**. Each script runs:
+  - `CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"`
+  - `source "${CONDA_ROOT}/etc/profile.d/conda.sh"`
+  - `conda activate plant`  
+  If you installed Miniconda elsewhere, either export `CONDA_ROOT` in the script header or set it when submitting: `CONDA_ROOT=/path/to/miniconda3 sbatch slurm/04_cfm.sh`.
+
+---
+
+### Step-by-step: Miniconda, conda `plant`, and Python packages
+
+Do this **once** on a login node (from your home directory is fine if Lustre scratch is not writable).
+
+**1. Install Miniconda under `$HOME`**
 
 ```bash
-ssh <user>@login.expanse.sdsc.edu
-cd /expanse/lustre/scratch/$USER/temp_project
-git clone <repo> PLANT_GW_Paleontology && cd PLANT_GW_Paleontology
+cd ~
+curl -L -o Miniconda3.sh "https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh"
+bash Miniconda3.sh -b -p "$HOME/miniconda3"
+rm -f Miniconda3.sh
+```
 
-module purge
-module load cpu    # or gpu — follow site guidance
-module load python/default  # if offered; otherwise e.g. module load python/3.11.5
+**2. Load conda in every new shell** (add to `~/.bashrc` if you like):
 
-python3 --version   # must show 3.10.x or newer
+```bash
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+```
 
-python3 -m venv .venv && source .venv/bin/activate
+**3. Accept Anaconda channel Terms of Service** (required for recent `conda`; run once):
+
+```bash
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+```
+
+**4. Create the `plant` environment (Python 3.11)**
+
+```bash
+conda create -y -n plant python=3.11 pip
+conda activate plant
+python --version    # expect 3.11.x
+```
+
+**5. Install PyTorch and project dependencies** (in the cloned repo)
+
+```bash
 pip install -U pip setuptools wheel
 
-# Recommended on GPU nodes: install PyTorch with CUDA first (pick cu121 vs cu124 from pytorch.org for your stack)
+# For GPU training (Steps 04 / 05)—adjust cu121 vs cu124 to match https://pytorch.org/get-started/locally/
 pip install "torch>=2.1,<2.6" torchvision --index-url https://download.pytorch.org/whl/cu121
 
-# Remaining deps (torch line in requirements.txt will usually be satisfied already)
+# CPU-only testing on login nodes:
+# pip install "torch>=2.1,<2.6" torchvision --index-url https://download.pytorch.org/whl/cpu
+
+cd /path/to/PLANT_GW_Paleontology
 pip install -r requirements.txt
-
-# Optional SBI stack only if you need it
-# pip install -r requirements-optional.txt
-
 mkdir -p logs
 ```
 
-If you only train on **CPU** in this venv, you can use `pip install "torch>=2.1,<2.6" torchvision --index-url https://download.pytorch.org/whl/cpu` instead of the CUDA URL, then `pip install -r requirements.txt`.
+**6. Optional — wider module tree:** if you use site compilers/MPI, run `module load sdsc` and then **`module load cpu` *or* `module load gpu`** (never both). The batch scripts already run the appropriate `module load` before `python`.
 
-Edit `slurm/*.sh` and replace `<<PROJECT>>` with your ACCESS allocation ID (find it with `expanse-client user`). Ensure batch scripts `module load` the **same** Python you used for the venv, or use a venv built with the cluster’s intended interpreter.
+---
+
+### Running the pipeline with SLURM (`sbatch`)
+
+1. **`cd`** into **`PLANT_GW_Paleontology/`** (the directory that contains `slurm/` and the numbered `*.py` scripts).
+2. Confirm **`conda activate plant`** works interactively and `python -c "import torch; print(torch.__version__)"` succeeds.
+3. Submit jobs from § **Full pipeline execution** below (e.g. `sbatch slurm/00_data_gen.sh`). Logs appear under **`logs/`**.
+4. If jobs fail with “conda: command not found” or “Could not find conda environment: plant”, fix **`CONDA_ROOT`** or recreate the `plant` env as above.
+
+**Site conda instead of Miniconda:** if you prefer `module load anaconda3`, create **`plant`** with `python=3.11` there, then either symlink that env or set **`CONDA_ROOT`** to that Anaconda install’s root so `source "${CONDA_ROOT}/etc/profile.d/conda.sh"` works inside the batch scripts.
 
 ### Full pipeline execution (in order)
 
-The SLURM scripts under `slurm/` are written for **production** settings: Step **03** uses a long CPU run (`--epochs 2000`), Steps **04** / **05** use **full** GPU training (see `slurm/04_cfm.sh`, `slurm/05_posterior_network.sh`). Run from the `PLANT_GW_Paleontology/` directory after `module load` + venv activation inside each script.
+The SLURM scripts under `slurm/` are written for **production** settings: Step **03** uses a long CPU run (`--epochs 2000`), Steps **04** / **05** use **full** GPU training (see `slurm/04_cfm.sh`, `slurm/05_posterior_network.sh`). Submit from **`PLANT_GW_Paleontology/`**; each script **`cd`s** to the submit directory, **activates conda env `plant`**, then runs **`module load`** and **`python`**.
 
 **Core pipeline (00 → 05)**
 
@@ -742,5 +786,5 @@ PLANT_GW_Paleontology/
 
 - **CPU vs GPU:** Steps 00–03 are typically CPU. Steps 04/04b and **05** (full) are best on **GPU** (05 repeatedly calls the frozen emulator’s sampler). **Order:** finish **one** of 04/04b **before** 05; Step 05 is **not** a substitute for 04/04b.
 - **Lustre constraint:** On Expanse, add `#SBATCH --constraint="lustre"` to any script if you place data on `/expanse/lustre/scratch` (Lustre is a **shared file system** tuned for large parallel reads—only relevant if your site uses it).
-- **Account ID:** Replace `<<PROJECT>>` in all SLURM scripts with your actual **allocation code** (the project the supercomputer bills time to).
+- **SLURM account:** Scripts use **`#SBATCH --account=PHY260100`** (your ACCESS project ID). The long title is **not** what Slurm bills against. If jobs fail accounting checks, verify with `expanse-client user` / the portal and edit the scripts if SDSC expects a different string (e.g. lowercase or `gic-…`).
 - **Checkpoint loading (technical):** e.g. `torch.load("checkpoints/cfm_final.pt", weights_only=False)`; posterior weights are in `checkpoints/posterior_network_best.pt` under the key `state_dict`, with Λ normalisation and column order in `posterior_network_config.json`.

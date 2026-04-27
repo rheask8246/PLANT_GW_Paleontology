@@ -9,7 +9,7 @@
 #SBATCH --gpus=1
 #SBATCH --mem=64G
 #SBATCH --time=24:00:00
-#SBATCH --account=<<PROJECT>>
+#SBATCH --account=PHY260100
 #SBATCH --export=ALL
 
 # Trains the posterior (Step 5) on **synthetic** catalogs from a **trained, frozen** emulator.
@@ -29,9 +29,12 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 mkdir -p logs
 
+CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
+source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+conda activate plant
+
 module purge
-# module load cuda/12.x  # site-specific
-# source .venv/bin/activate  # or conda
+module load gpu
 
 python 05_posterior_network.py \
     --emulator cfm \

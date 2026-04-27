@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=04:00:00
-#SBATCH --account=<<PROJECT>>
+#SBATCH --account=PHY260100
 #SBATCH --export=ALL
 
 set -euo pipefail
@@ -17,7 +17,9 @@ mkdir -p logs
 
 module purge
 module load cpu
-source .venv/bin/activate
+CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
+source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+conda activate plant
 
 python 06_population_figures.py \
     --sspc-hdf5 data/sspc/models_sspc.hdf5 \

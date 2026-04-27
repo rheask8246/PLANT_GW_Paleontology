@@ -1,0 +1,2 @@
+# Optional dependencies (install on top of requirements.txt if needed).
+sbi>=0.22.0
