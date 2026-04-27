@@ -20,7 +20,7 @@ def normalize_obs(obs: np.ndarray, normalizer: Dict, columns: list = None) -> np
     Normalize observables for CFM input. Same transform as 02_build_dataset stats.
 
     mchirp, z: log10(x) FIRST, then x_norm = (log10(x) - mean) / std
-              (mean, std are of log10 values from detection-weighted events)
+              (mean, std match 02’s `all_events` / obs_normalizer.json)
     q, chieff: x_norm = (x - mean) / std directly
 
     obs: (N, 4) with columns [mchirp, q, chieff, z]

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import h5py
@@ -686,15 +687,46 @@ def main():
                         help="Path to models_sspc.hdf5")
     parser.add_argument("--compas-hdf5", type=Path, default=_COMPAS_DEFAULT,
                         help="Path to COMPAS_Output_wWeights.h5")
-    parser.add_argument("--output", type=Path,
-                        default=_FIG5_OUTPUT_DEFAULT,
-                        help="Output path for Figure 5-style mass-distribution comparison")
-    parser.add_argument("--fig4-output", "--fig6-output", dest="fig4_output", type=Path,
-                        default=_FIG4_OUTPUT_DEFAULT,
-                        help="Output path for Figure 4-style merger-rate-density vs redshift comparison")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="If set, write all figures into this directory. If unset, use "
+        "`plots/distribution_analysis/<timestamp>/` unless --no-timestamped-dir is given.",
+    )
+    parser.add_argument(
+        "--no-timestamped-dir",
+        action="store_true",
+        help="Use legacy default filenames under plots/distribution_analysis/ (no new subfolder).",
+    )
+    parser.add_argument("--output", type=Path, default=None,
+                        help="Output path for Figure 5 (overrides --output-dir).")
+    parser.add_argument("--fig4-output", "--fig6-output", dest="fig4_output", type=Path, default=None,
+                        help="Output path for Figure 4/6 (overrides --output-dir).")
     parser.add_argument("--skip-fig4", "--skip-fig6", dest="skip_fig4", action="store_true",
                         help="Skip generating Figure 4 comparison plot")
     args = parser.parse_args()
+
+    if args.output_dir is not None:
+        args.output_dir = args.output_dir.resolve()
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        if args.output is None:
+            args.output = args.output_dir / "data_distribution_analysis.png"
+        if args.fig4_output is None:
+            args.fig4_output = args.output_dir / "merger_rate_density_redshift.png"
+    elif args.output is None and args.fig4_output is None and not args.no_timestamped_dir:
+        base = _DIST_PLOT_DIR_DEFAULT / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        base.mkdir(parents=True, exist_ok=True)
+        args.output = base / "data_distribution_analysis.png"
+        args.fig4_output = base / "merger_rate_density_redshift.png"
+    else:
+        if args.output is None:
+            args.output = _FIG5_OUTPUT_DEFAULT
+        if args.fig4_output is None:
+            if args.output is not None and args.output != _FIG5_OUTPUT_DEFAULT:
+                args.fig4_output = args.output.parent / "merger_rate_density_redshift.png"
+            else:
+                args.fig4_output = _FIG4_OUTPUT_DEFAULT
 
     print("=== BBH Primary Mass Distribution Analysis ===")
     print(f"TNG data dir : {args.tng_data_dir}")

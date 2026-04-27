@@ -10,8 +10,8 @@ Supports two data sources (--data-source flag):
 Outputs:
 - hyperparam_table.csv          : Λ → ε table (channel, param1, param2, n_systems, …)
 - hyperparam_table_encoded.csv  : Same + channel_id, channel_onehot, p1_norm, p2_norm, lambda_vec
-- all_events.parquet           : Weighted event samples (N_sample per grid point)
-- all_detected_events.parquet   : Detection-weighted event samples (N_det per grid point)
+- all_events.parquet           : Intrinsic merger-rate samples (N_sample per grid point); main input for 04/04b and obs_normalizer
+- all_detected_events.parquet  : Optional detection-subsampled table (N_det per grid) for other analyses, not the default ML path
 - splits.json                   : Train/val/test grid point indices (stratified by channel)
 """
 
@@ -199,12 +199,19 @@ def build_hyperparam_table(hdf5_path: Path, data_source: str = "auto") -> pd.Dat
         }
 
         # Optional SSPC parameters: aggregate at grid level if present.
+        # SSPC: use intrinsic weights only (no pdet) so nuisance means match the pipeline.
+        w_sspc = np.asarray(weight, dtype=np.float64)
+        w_sspc_sum = float(np.sum(w_sspc))
         for col in SSPC_PARAM_COLS:
             if col in df.columns:
                 x = df[col].values.astype(np.float64)
-                if w_eff_sum > 0:
-                    mean_x = float(np.sum(w_eff * x) / w_eff_sum)
-                    var_x = float(np.sum(w_eff * (x - mean_x) ** 2) / w_eff_sum)
+                if data_source == "sspc":
+                    w_use, wsum = w_sspc, w_sspc_sum
+                else:
+                    w_use, wsum = w_eff, w_eff_sum
+                if wsum > 0:
+                    mean_x = float(np.sum(w_use * x) / wsum)
+                    var_x = float(np.sum(w_use * (x - mean_x) ** 2) / wsum)
                     std_x = float(np.sqrt(max(var_x, 0.0)))
                 else:
                     mean_x = float(np.mean(x))
@@ -416,10 +423,10 @@ def stratified_split(encoded_df: pd.DataFrame) -> Dict[str, List[int]]:
     }
 
 
-def compute_and_save_obs_normalizer(detected_df: pd.DataFrame, out_path: Path) -> Dict:
+def compute_and_save_obs_normalizer(events_df: pd.DataFrame, out_path: Path) -> Dict:
     """
-    Compute normalization statistics from DETECTION-WEIGHTED events only.
-    This ensures normalization matches what the CFM will see during training.
+    Compute normalization from the intrinsic (merger-rate–weighted) event table,
+    so the same stats apply to 04/04b training on `all_events.parquet`.
 
     mchirp, z: log10 transform FIRST, then mean/std of log values
     q, chieff: mean/std directly (already bounded)
@@ -429,7 +436,7 @@ def compute_and_save_obs_normalizer(detected_df: pd.DataFrame, out_path: Path) -
     eps = 1e-8
 
     for col in cols:
-        x = detected_df[col].values.astype(np.float64)
+        x = events_df[col].values.astype(np.float64)
         if col == "mchirp":
             x_log = np.log10(np.maximum(x, 1e-3))
             mean_val = float(np.mean(x_log))
@@ -452,7 +459,7 @@ def compute_and_save_obs_normalizer(detected_df: pd.DataFrame, out_path: Path) -
     with open(out_path, "w") as f:
         json.dump(normalizer, f, indent=2)
 
-    print("   Observable normalization (from all_detected_events.parquet):")
+    print("   Observable normalization (from all_events.parquet):")
     print(f"   mchirp: mean_log_mchirp = {normalizer['mchirp']['mean']:.6f}, std_log_mchirp = {normalizer['mchirp']['std']:.6f}")
     print(f"   q: mean_q = {normalizer['q']['mean']:.6f}, std_q = {normalizer['q']['std']:.6f}")
     print(f"   chieff: mean_chieff = {normalizer['chieff']['mean']:.6f}, std_chieff = {normalizer['chieff']['std']:.6f}")
@@ -520,9 +527,9 @@ def main() -> None:
         json.dump(splits, f, indent=2)
     print(f"   Saved: {splits_json}")
 
-    print("5. Computing observable normalization (from detection-weighted events)...")
+    print("5. Computing observable normalization (from intrinsic all_events rows)...")
     obs_normalizer_path = out_dir / "checkpoints" / "obs_normalizer.json"
-    compute_and_save_obs_normalizer(all_detected_df, obs_normalizer_path)
+    compute_and_save_obs_normalizer(all_events_df, obs_normalizer_path)
 
     print("Done.")
 

@@ -14,15 +14,19 @@ data/*.hdf5
 data/*.h5
 data/*.tar.gz
 
-# Generated ML artifacts
-checkpoints/*.pt
-checkpoints/*.pkl
-checkpoints/*.json
-checkpoints/*.png
+# Generated ML artifacts (any path under checkpoints/, including ensemble subdirs)
+checkpoints/
 
-# Generated datasets
+# Generated datasets / tables from Step 02 (repo root or data/)
+*.parquet
+hyperparam_table.csv
+hyperparam_table_encoded.csv
+splits.json
+obs_normalizer.json
+
 data/*.parquet
 data/*.csv
+!data/gwtc_sample_events.csv
 data/*.json
 
 # SLURM logs
@@ -30,10 +34,10 @@ logs/
 *.out
 *.err
 
-# Plots (regenerated each run)
-plots/cfm_smoke_test/
-plots/diffusion_smoke_test/
-plots/rate_network/
+# Plots and validation outputs (regenerate on cluster or laptop)
+plots/
+test/reports/
+test/plots/
 
 # Jupyter
 .ipynb_checkpoints/

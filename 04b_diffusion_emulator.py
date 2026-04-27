@@ -2,7 +2,7 @@
 """
 Diffusion Emulator: DDPM for merger event generation.
 
-Mirrors 04_cfm_emulator.py structure. Uses same data, normalizer, and validation.
+Mirrors 04_cfm_emulator.py structure. Same intrinsic `all_events` data, normalizer, validation.
 Outputs same plots to plots/diffusion_smoke_test/ for comparison.
 """
 
@@ -26,7 +26,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 # =============================================================================
 WORK_DIR = Path(".")
 HYPERPARAM_CSV = WORK_DIR / "hyperparam_table_encoded.csv"
-ALL_DETECTED_PARQUET = WORK_DIR / "all_detected_events.parquet"
+ALL_EVENTS_PARQUET = WORK_DIR / "all_events.parquet"
 SPLITS_JSON = WORK_DIR / "splits.json"
 CHECKPOINT_DIR = WORK_DIR / "checkpoints"
 OBS_NORMALIZER_JSON = CHECKPOINT_DIR / "obs_normalizer.json"
@@ -44,6 +44,12 @@ def _find_work_dir() -> Path:
         if (d / "hyperparam_table_encoded.csv").exists():
             return d.resolve()
     return Path(".").resolve()
+
+
+def _grid_rate_column(hp_df: pd.DataFrame) -> str:
+    if "sum_weight" in hp_df.columns:
+        return "sum_weight"
+    return "sum_pdet"
 
 
 def load_or_build_obs_normalizer(parquet_path: Path, out_path: Path) -> Dict:
@@ -99,8 +105,13 @@ def _lambda_cols(df: pd.DataFrame) -> List[str]:
     )
 
 
-def run_smoke_test(device: str = "cpu", steps: int = 500) -> None:
-    """Run 500-step smoke test and validate 7 checks."""
+def run_smoke_test(
+    device: str = "cpu",
+    steps: int = 500,
+    output_checkpoint: Path | None = None,
+    seed: int = 42,
+) -> None:
+    """Run smoke/full diffusion training and save checkpoint."""
     import sys
     sys.path.insert(0, str(_find_work_dir()))
     from models.diffusion_emulator import (
@@ -112,7 +123,7 @@ def run_smoke_test(device: str = "cpu", steps: int = 500) -> None:
 
     work_dir = _find_work_dir()
     hp_csv = work_dir / "hyperparam_table_encoded.csv"
-    events_pq = work_dir / "all_detected_events.parquet"
+    events_pq = work_dir / "all_events.parquet"
     splits_path = work_dir / "splits.json"
     ckpt_dir = work_dir / "checkpoints"
 
@@ -131,21 +142,21 @@ def run_smoke_test(device: str = "cpu", steps: int = 500) -> None:
     val_idx = splits["val"]
     test_idx = splits["test"]
 
-    # Importance weights: floor at 1% of median to prevent near-zero sum_pdet points
-    # (e.g., undetectable CHE combos with sum_pdet ~ 1e-6) from dominating sampling.
-    # Without this floor, one degenerate point gets ~100% sampling probability and
-    # importance_ratio ≈ 0, giving zero gradient — train loss collapses to 0 trivially.
-    sum_pdet = hp_df["sum_pdet"].values
-    pdet_floor = max(float(np.median(sum_pdet)) * 0.01, 1e-4)
-    sum_pdet_clipped = np.maximum(sum_pdet, pdet_floor)
-    w = 1.0 / sum_pdet_clipped
+    # Importance weights: floor at 1% of median to prevent near-zero intrinsic rate
+    # totals from dominating sampling. Without this floor, one degenerate point gets
+    # ~100% sampling probability and importance_ratio ≈ 0, giving zero gradient.
+    rate_col = _grid_rate_column(hp_df)
+    rate_tot = hp_df[rate_col].values
+    r_floor = max(float(np.median(rate_tot)) * 0.01, 1e-4)
+    rate_clipped = np.maximum(rate_tot, r_floor)
+    w = 1.0 / rate_clipped
     w = w / w.sum()
     n_grid = len(hp_df)
     p_uniform = 1.0 / n_grid
 
     events_df = pd.read_parquet(events_pq)
-    rng = np.random.default_rng(42)
-    torch.manual_seed(42)
+    rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
 
     lambda_cols = _lambda_cols(hp_df)
     model = DiffusionEmulator(lambda_dim=len(lambda_cols), context_dim=128, hidden_dim=HIDDEN_DIM, n_timesteps=N_TIMESTEPS)
@@ -312,7 +323,8 @@ def run_smoke_test(device: str = "cpu", steps: int = 500) -> None:
     # Save final model checkpoint
     final_ckpt_dir = work_dir / "checkpoints"
     final_ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = final_ckpt_dir / "diffusion_final.pt"
+    ckpt_path = output_checkpoint if output_checkpoint is not None else final_ckpt_dir / "diffusion_final.pt"
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "model_state": model.state_dict(),
         "normalizer": normalizer,
@@ -321,6 +333,7 @@ def run_smoke_test(device: str = "cpu", steps: int = 500) -> None:
         "hidden_dim": HIDDEN_DIM,
         "n_timesteps": N_TIMESTEPS,
         "context_dim": 128,
+        "seed": seed,
     }, ckpt_path)
     print(f"\n  Saved final diffusion checkpoint to {ckpt_path}")
 
@@ -648,7 +661,8 @@ def run_extended_smoke_test_validation(
     # 5. FAILURE MODE CHECKS
     # -------------------------------------------------------------------------
 
-    sorted_idx = np.argsort(hp_df["sum_pdet"].values)[:3]
+    rcol = _grid_rate_column(hp_df)
+    sorted_idx = np.argsort(hp_df[rcol].values)[:3]
     any_nan = False
     any_invalid = False
     for gi in sorted_idx:
@@ -849,13 +863,23 @@ def run_extended_smoke_test_validation(
     print(f"  Saved all plots to {plots_dir}")
 
 
-def run_full_training(device: str = "cpu", steps: int = 100_000) -> None:
+def run_full_training(
+    device: str = "cpu",
+    steps: int = 100_000,
+    output_checkpoint: Path | None = None,
+    seed: int = 42,
+) -> None:
     """Full training run with full model capacity (hidden_dim=256, N_BATCH=256)."""
     global HIDDEN_DIM, N_BATCH
     HIDDEN_DIM = 256
     N_BATCH = 256
     try:
-        run_smoke_test(device=device, steps=steps)
+        run_smoke_test(
+            device=device,
+            steps=steps,
+            output_checkpoint=output_checkpoint,
+            seed=seed,
+        )
     except RuntimeError as e:
         print(f"\nNote: {e}  (training artefact — continuing normally.)")
 
@@ -865,6 +889,13 @@ def main() -> None:
     parser.add_argument("--smoke-test", action="store_true", help="Run smoke test on CPU")
     parser.add_argument("--steps", type=int, default=500, help="Number of training steps (default: 500)")
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument(
+        "--output-checkpoint",
+        type=Path,
+        default=None,
+        help="Path for diffusion_final.pt (default: checkpoints/diffusion_final.pt).",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="RNG for numpy/torch and training.")
     args = parser.parse_args()
 
     global SMOKE_TEST
@@ -872,11 +903,21 @@ def main() -> None:
 
     start = time.perf_counter()
     if SMOKE_TEST:
-        run_smoke_test(device=args.device, steps=args.steps)
+        run_smoke_test(
+            device=args.device,
+            steps=args.steps,
+            output_checkpoint=args.output_checkpoint,
+            seed=args.seed,
+        )
         elapsed = time.perf_counter() - start
         print(f"\nDiffusion smoke test completed in {elapsed:.1f}s ({elapsed/60:.1f} min)")
     else:
-        run_full_training(device=args.device, steps=args.steps)
+        run_full_training(
+            device=args.device,
+            steps=args.steps,
+            output_checkpoint=args.output_checkpoint,
+            seed=args.seed,
+        )
         elapsed = time.perf_counter() - start
         print(f"\nDiffusion full training completed in {elapsed:.1f}s ({elapsed/60:.1f} min)")
 

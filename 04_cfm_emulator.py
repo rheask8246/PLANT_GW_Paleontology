@@ -2,7 +2,7 @@
 """
 CFM Emulator: Conditional Flow Matching for merger event generation.
 
-Uses all_detected_events.parquet, hyperparam_table_encoded.csv, splits.json.
+Uses all_events.parquet (intrinsic merger samples), hyperparam_table_encoded.csv, splits.json.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 # =============================================================================
 WORK_DIR = Path(".")
 HYPERPARAM_CSV = WORK_DIR / "hyperparam_table_encoded.csv"
-ALL_DETECTED_PARQUET = WORK_DIR / "all_detected_events.parquet"
+ALL_EVENTS_PARQUET = WORK_DIR / "all_events.parquet"
 SPLITS_JSON = WORK_DIR / "splits.json"
 CHECKPOINT_DIR = WORK_DIR / "checkpoints"
 OBS_NORMALIZER_JSON = CHECKPOINT_DIR / "obs_normalizer.json"
@@ -63,11 +63,17 @@ def _find_work_dir() -> Path:
     return Path(".").resolve()
 
 
+def _grid_rate_column(hp_df: pd.DataFrame) -> str:
+    """Per-grid total merger rate for importance reweighting (intrinsic: sum_weight)."""
+    if "sum_weight" in hp_df.columns:
+        return "sum_weight"
+    return "sum_pdet"
+
+
 def load_or_build_obs_normalizer(parquet_path: Path, out_path: Path) -> Dict:
     """
     Load normalizer from 02_build_dataset.py output if it exists.
-    Otherwise compute from all_detected_events.parquet (same logic as 02).
-    Uses DETECTION-WEIGHTED events only. mchirp, z: log10 first, then mean/std.
+    Otherwise build from the same intrinsic table (all_events) as 02. mchirp, z: log10 first, then mean/std.
     """
     if out_path.exists():
         with open(out_path) as f:
@@ -109,7 +115,7 @@ def sample_events_from_grid(
     rng: np.random.Generator,
     z_jitter: bool = True,
 ) -> np.ndarray:
-    """Sample n events from grid_idx using detection weights. Returns (n, 4) raw [mchirp,q,chieff,z]."""
+    """Uniform row subsample for grid_idx (expect intrinsic `all_events` from 02). Returns (n,4) [mchirp,q,chieff,z]."""
     mask = events_df["grid_idx"] == grid_idx
     sub = events_df.loc[mask, ["mchirp", "q", "chieff", "z"]]
     if len(sub) == 0:
@@ -125,15 +131,20 @@ def sample_events_from_grid(
     return x
 
 
-def run_smoke_test(device: str = "cpu", steps: int = 500) -> None:
-    """Run 500-step smoke test and validate 7 checks."""
+def run_smoke_test(
+    device: str = "cpu",
+    steps: int = 500,
+    output_checkpoint: Path | None = None,
+    seed: int = 42,
+) -> None:
+    """Run smoke test (or full run when global SMOKE_TEST is False) and save checkpoint."""
     import sys
     sys.path.insert(0, str(_find_work_dir()))
     from models.cfm_emulator import CFMEmulator, normalize_obs, denormalize_obs, generate_catalog
 
     work_dir = _find_work_dir()
     hp_csv = work_dir / "hyperparam_table_encoded.csv"
-    events_pq = work_dir / "all_detected_events.parquet"
+    events_pq = work_dir / "all_events.parquet"
     splits_path = work_dir / "splits.json"
     ckpt_dir = work_dir / "checkpoints"
 
@@ -153,22 +164,22 @@ def run_smoke_test(device: str = "cpu", steps: int = 500) -> None:
     val_idx = splits["val"]
     test_idx = splits["test"]
 
-    # Importance weights: sample rare (low-rate) grid points more often.
-    # Floor at 1% of the median to prevent near-zero sum_pdet points (e.g., CHE at
-    # undetectable parameter combos, sum_pdet ~ 1e-6) from dominating the sampling
-    # distribution. Without this floor, one degenerate point absorbs ~100% of sampling
-    # probability and produces importance_ratio ≈ 0, giving zero gradient throughout.
-    sum_pdet = hp_df["sum_pdet"].values
-    pdet_floor = max(float(np.median(sum_pdet)) * 0.01, 1e-4)
-    sum_pdet_clipped = np.maximum(sum_pdet, pdet_floor)
-    w = 1.0 / sum_pdet_clipped
+    # Importance weights: sample rare (low intrinsic rate) grid points more often.
+    # Floor at 1% of the median to prevent near-zero rate totals from dominating the
+    # sampling distribution. Without this floor, one degenerate point absorbs ~100% of
+    # sampling probability and produces importance_ratio ≈ 0, giving zero gradient throughout.
+    rate_col = _grid_rate_column(hp_df)
+    rate_tot = hp_df[rate_col].values
+    r_floor = max(float(np.median(rate_tot)) * 0.01, 1e-4)
+    rate_clipped = np.maximum(rate_tot, r_floor)
+    w = 1.0 / rate_clipped
     w = w / w.sum()
     n_grid = len(hp_df)
     p_uniform = 1.0 / n_grid
 
     events_df = pd.read_parquet(events_pq)
-    rng = np.random.default_rng(42)
-    torch.manual_seed(42)
+    rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
 
     lambda_cols = _lambda_cols(hp_df)
     model = CFMEmulator(lambda_dim=len(lambda_cols), context_dim=128, hidden_dim=HIDDEN_DIM)
@@ -256,7 +267,7 @@ def run_smoke_test(device: str = "cpu", steps: int = 500) -> None:
                     val_loss += ((vt - ut) ** 2).mean().item()
             val_loss /= min(3, len(val_idx))
             val_losses.append((step + 1, val_loss))
-            torch.manual_seed(42 + step)
+            torch.manual_seed(seed + step)
             cat_kl = generate_catalog(lam_ce, 1000, model, normalizer)
             true_kl = sample_events_from_grid(events_df, grid_idx_ce, 1000, rng)
             mchirp_kl = _histogram_kl(true_kl[:, 0], cat_kl["mchirp"].values)
@@ -342,7 +353,8 @@ def run_smoke_test(device: str = "cpu", steps: int = 500) -> None:
     # Save final model checkpoint
     final_ckpt_dir = work_dir / "checkpoints"
     final_ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = final_ckpt_dir / "cfm_final.pt"
+    ckpt_path = output_checkpoint if output_checkpoint is not None else final_ckpt_dir / "cfm_final.pt"
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "model_state": model.state_dict(),
         "normalizer": normalizer,
@@ -350,6 +362,7 @@ def run_smoke_test(device: str = "cpu", steps: int = 500) -> None:
         "steps": steps,
         "hidden_dim": HIDDEN_DIM,
         "context_dim": 128,
+        "seed": seed,
     }, ckpt_path)
     print(f"\n  Saved final CFM checkpoint to {ckpt_path}")
 
@@ -698,8 +711,9 @@ def run_extended_smoke_test_validation(
     # 5. FAILURE MODE CHECKS
     # -------------------------------------------------------------------------
 
-    # 5a) Extreme hyperparameters (lowest sum_pdet)
-    sorted_idx = np.argsort(hp_df["sum_pdet"].values)[:3]
+    # 5a) Extreme hyperparameters (lowest intrinsic rate total)
+    rcol = _grid_rate_column(hp_df)
+    sorted_idx = np.argsort(hp_df[rcol].values)[:3]
     any_nan = False
     any_invalid = False
     for gi in sorted_idx:
@@ -903,13 +917,23 @@ def run_extended_smoke_test_validation(
     print(f"  Saved all plots to {plots_dir}")
 
 
-def run_full_training(device: str = "cpu", steps: int = 100_000) -> None:
+def run_full_training(
+    device: str = "cpu",
+    steps: int = 100_000,
+    output_checkpoint: Path | None = None,
+    seed: int = 42,
+) -> None:
     """Full training run with full model capacity (hidden_dim=256, N_BATCH=256)."""
     global HIDDEN_DIM, N_BATCH
     HIDDEN_DIM = 256
     N_BATCH = 256
     try:
-        run_smoke_test(device=device, steps=steps)
+        run_smoke_test(
+            device=device,
+            steps=steps,
+            output_checkpoint=output_checkpoint,
+            seed=seed,
+        )
     except RuntimeError as e:
         print(f"\nNote: {e}  (training artefact — continuing normally.")
 
@@ -919,6 +943,13 @@ def main() -> None:
     parser.add_argument("--smoke-test", action="store_true", help="Run smoke test on CPU")
     parser.add_argument("--steps", type=int, default=500, help="Number of training steps (default: 500)")
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument(
+        "--output-checkpoint",
+        type=Path,
+        default=None,
+        help="Path for cfm_final.pt (default: checkpoints/cfm_final.pt under work dir).",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="RNG for numpy/torch and training.")
     args = parser.parse_args()
 
     global SMOKE_TEST
@@ -926,14 +957,24 @@ def main() -> None:
 
     if SMOKE_TEST:
         start = time.perf_counter()
-        run_smoke_test(device=args.device, steps=args.steps)
+        run_smoke_test(
+            device=args.device,
+            steps=args.steps,
+            output_checkpoint=args.output_checkpoint,
+            seed=args.seed,
+        )
         elapsed = time.perf_counter() - start
         print(f"\nCFM smoke test completed in {elapsed:.1f}s ({elapsed/60:.1f} min)")
         return
 
     # Full training
     start = time.perf_counter()
-    run_full_training(device=args.device, steps=args.steps)
+    run_full_training(
+        device=args.device,
+        steps=args.steps,
+        output_checkpoint=args.output_checkpoint,
+        seed=args.seed,
+    )
     elapsed = time.perf_counter() - start
     print(f"\nCFM full training completed in {elapsed:.1f}s ({elapsed/60:.1f} min)")
 

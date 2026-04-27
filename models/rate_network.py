@@ -1,8 +1,8 @@
 """
 Rate network model for SSPC data.
 
-Input:  5-dim feature vector [CE_ind, CHE_ind, SMT_ind, sfra_norm, mu0_norm]
-Output: log10(Σ det_weight) — total observer-frame detection rate
+Input:  feature vector from 03 (channel one-hot + normalized SSPC means)
+Output: log10(per-grid intrinsic merger rate), i.e. target from `sum_weight` in 02
 
 The NormalizedNet wrapper inverts z-score normalisation so forward() always
 returns values in log10 scale.  Checkpoint format matches 03_rate_network.py.

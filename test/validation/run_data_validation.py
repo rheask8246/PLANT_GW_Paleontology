@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,15 +43,18 @@ class ValidationConfig:
     seed: int = 42
 
 
-def _default_config(project_root: Path) -> ValidationConfig:
+def _default_config(project_root: Path, timestamp: str | None = None) -> ValidationConfig:
+    ts = timestamp or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    base_reports = project_root / "test" / "reports" / "validation"
+    base_plots = project_root / "test" / "plots" / "validation"
     return ValidationConfig(
         project_root=project_root,
         hyperparam_csv=project_root / "hyperparam_table.csv",
         hyperparam_encoded_csv=project_root / "hyperparam_table_encoded.csv",
         splits_json=project_root / "splits.json",
         events_parquet=project_root / "all_events.parquet",
-        report_dir=project_root / "test" / "reports" / "validation",
-        plot_dir=project_root / "test" / "plots" / "validation",
+        report_dir=base_reports / ts,
+        plot_dir=base_plots / ts,
     )
 
 
@@ -552,8 +556,7 @@ def _build_markdown_summary(results: list[dict[str, Any]], out_path: Path) -> No
         "",
         "## Generated Artifacts",
         "",
-        "- Reports: `test/reports/validation/`",
-        "- Plots: `test/plots/validation/`",
+        "- Reports and plots: under timestamped subfolders of `test/reports/validation/` and `test/plots/validation/` when using default paths",
         "",
     ]
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -603,12 +606,40 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--events-parquet", type=Path, default=None, help="Override intrinsic events parquet path")
     p.add_argument("--rare-quantile", type=float, default=0.05, help="Quantile threshold for rare intrinsic regions")
     p.add_argument("--strict", action="store_true", help="Return non-zero exit code on warn/fail")
+    p.add_argument(
+        "--no-timestamp-subdir",
+        action="store_true",
+        help="Write reports/plots directly to test/reports/validation and test/plots/validation (legacy layout).",
+    )
+    p.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Optional subfolder name (default: current timestamp). Ignored if --no-timestamp-subdir.",
+    )
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    cfg = _default_config(args.project_root.resolve())
+    ts: str | None = None
+    if args.no_timestamp_subdir:
+        root = args.project_root.resolve()
+        cfg = ValidationConfig(
+            project_root=root,
+            hyperparam_csv=root / "hyperparam_table.csv",
+            hyperparam_encoded_csv=root / "hyperparam_table_encoded.csv",
+            splits_json=root / "splits.json",
+            events_parquet=root / "all_events.parquet",
+            report_dir=root / "test" / "reports" / "validation",
+            plot_dir=root / "test" / "plots" / "validation",
+            rare_quantile=float(args.rare_quantile),
+            max_scatter_points=30_000,
+            seed=42,
+        )
+    else:
+        ts = args.run_id or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        cfg = _default_config(args.project_root.resolve(), timestamp=ts)
     if args.events_parquet is not None:
         cfg.events_parquet = args.events_parquet.resolve()
     cfg.rare_quantile = float(args.rare_quantile)

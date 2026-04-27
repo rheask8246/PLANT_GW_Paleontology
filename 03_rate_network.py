@@ -2,8 +2,9 @@
 """
 Rate network for SSPC data.
 
-Predicts log10(Σ det_weight) — total observer-frame detection rate — as a
-function of all 9 SSPC hyperparameters + channel:
+Predicts log10(per-grid total intrinsic merger rate) as a
+function of all 9 SSPC hyperparameters + channel
+(target column `sum_weight` from 02; falls back to `sum_pdet` if needed):
 
   [CE_ind, CHE_ind, SMT_ind,
    sfr_a, sfr_b, sfr_c, sfr_d,   (Madau-Dickinson SFR shape)
@@ -47,6 +48,14 @@ PLOTS_BASE     = _HERE / "plots" / "rate_network"
 
 LOG_RATE_FLOOR = -5.0
 
+
+def _rate_target_col(df: pd.DataFrame) -> str:
+    """Per-grid log₁₀(rate) target: prefer intrinsic `sum_weight` (02 has both; SSPC: sum_pdet==sum_weight)."""
+    if "sum_weight" in df.columns:
+        return "sum_weight"
+    return "sum_pdet"
+
+
 # 9 SSPC parameter columns (mean values from integration)
 SSPC_PARAM_COLS = [
     "sspc_sfr_a_mean", "sspc_sfr_b_mean", "sspc_sfr_c_mean", "sspc_sfr_d_mean",
@@ -77,7 +86,7 @@ def build_features(df: pd.DataFrame):
     """
     Return (X, y, norm_params) where:
       X : (N, 12) float32 — [CE, CHE, SMT, sfr_a_n, sfr_b_n, ..., alpha_skew_n]
-      y : (N,)    float64 — log10(Σ det_weight), floor at LOG_RATE_FLOOR
+      y : (N,)    float64 — log10(per-grid intrinsic rate), floor at LOG_RATE_FLOOR
       norm_params: dict of {col: (min, max)} for inversion / inference
     """
     missing = [c for c in SSPC_PARAM_COLS if c not in df.columns]
@@ -100,7 +109,7 @@ def build_features(df: pd.DataFrame):
 
     X = np.column_stack([ce, che, smt, X_norm])
 
-    y_raw = np.log10(df["sum_pdet"].values.astype(np.float64).clip(1e-300))
+    y_raw = np.log10(df[_rate_target_col(df)].values.astype(np.float64).clip(1e-300))
     n_clip = int((y_raw < LOG_RATE_FLOOR).sum())
     if n_clip:
         print(f"  [rate] Clipping {n_clip} near-zero grid pts (min={y_raw.min():.1f}) to floor={LOG_RATE_FLOOR}")
@@ -334,7 +343,9 @@ def plot_param_sensitivity(model, df, norm_params, plots_dir):
             ax.plot(scan, pred, color=CHANNEL_COLORS.get(ch, "gray"), lw=2)
             # Overlay actual data for this channel
             ch_df = df[df["channel"] == ch]
-            y_ch = np.clip(np.log10(ch_df["sum_pdet"].clip(1e-300)), LOG_RATE_FLOOR, None)
+            y_ch = np.clip(
+                np.log10(ch_df[_rate_target_col(ch_df)].clip(1e-300)), LOG_RATE_FLOOR, None
+            )
             ax.scatter(ch_df[sspc_col], y_ch.values,
                        color=CHANNEL_COLORS.get(ch, "gray"), s=12, alpha=0.5)
             ax.set_xlabel(label, fontsize=9)
@@ -370,7 +381,9 @@ def plot_sfra_mu0_heatmap(model, df, norm_params, plots_dir):
     fig, axes = plt.subplots(1, len(channels), figsize=(6 * len(channels), 5), squeeze=False)
 
     # Global colour range from actual data
-    y_all = np.clip(np.log10(df["sum_pdet"].clip(1e-300)), LOG_RATE_FLOOR, None)
+    y_all = np.clip(
+        np.log10(df[_rate_target_col(df)].clip(1e-300)), LOG_RATE_FLOOR, None
+    )
     vmin, vmax = float(y_all.min()), float(y_all.max())
 
     for ax, ch in zip(axes[0], channels):
@@ -390,7 +403,9 @@ def plot_sfra_mu0_heatmap(model, df, norm_params, plots_dir):
 
         # Overlay true data points (coloured by true rate)
         ch_df = df[df["channel"] == ch]
-        y_ch  = np.clip(np.log10(ch_df["sum_pdet"].clip(1e-300)), LOG_RATE_FLOOR, None)
+        y_ch  = np.clip(
+            np.log10(ch_df[_rate_target_col(ch_df)].clip(1e-300)), LOG_RATE_FLOOR, None
+        )
         ax.scatter(ch_df["sspc_sfr_a_mean"], ch_df["sspc_mu0_mean"],
                    c=y_ch.values, cmap="viridis", vmin=vmin, vmax=vmax,
                    s=70, edgecolors="white", lw=0.8, zorder=5)
