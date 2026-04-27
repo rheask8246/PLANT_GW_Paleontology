@@ -6,13 +6,17 @@ __pycache__/
 venv/
 *.egg-info/
 
-# Large data files — store externally (Globus / local copy only)
-data/bps_output.h5
+# Large data files — store externally (Globus / local copy only) unless tracked below
 data/SNR_Grid_IMRPhenomPv2_FD_all_noise.hdf5
 data/sspc/
-data/*.hdf5
-data/*.h5
 data/*.tar.gz
+
+# BPS input: allow one committed copy for Step 00 (use Git LFS if > ~100 MB; GitHub hard limit 100 MB per file).
+# If your file is named *.hdf5, rename or symlink to data/bps_output.h5 or pass --bps-hdf5 to 00_sspc_data_generation.py
+data/*.hdf5
+!data/bps_output.hdf5
+data/*.h5
+!data/bps_output.h5
 
 # Generated ML artifacts (any path under checkpoints/, including ensemble subdirs)
 checkpoints/
