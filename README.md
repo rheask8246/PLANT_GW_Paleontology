@@ -58,7 +58,7 @@ This repository is a **software pipeline** that helps scientists ask: *When pair
 
 This repository’s `slurm/*.sh` files are **pre-configured** for:
 
-- **`#SBATCH --account=PHY260100`** — ACCESS award **PHY260100** (*Neural Population Inference for Gravitational Wave Astrophysics via Conditional Flow Matching*). If the scheduler rejects the job, confirm the exact charge string with `expanse-client user` (sometimes case or suffix differs).
+- **`#SBATCH --account=sdp153`** — this must match the **PROJECT** column from `expanse-client user` on Expanse (here **`sdp153`**), *not* the ACCESS award code alone. Your TG project **TG-PHY260100** is separate metadata; Slurm charges against **`sdp153`**. If submission still fails, run `expanse-client user` again and use the **PROJECT** value exactly.
 - **Conda env `plant`** with Miniconda installed under **`$HOME/miniconda3`**. Each script runs:
   - `CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"`
   - `source "${CONDA_ROOT}/etc/profile.d/conda.sh"`
@@ -126,7 +126,8 @@ mkdir -p logs
 1. **`cd`** into **`PLANT_GW_Paleontology/`** (the directory that contains `slurm/` and the numbered `*.py` scripts).
 2. Confirm **`conda activate plant`** works interactively and `python -c "import torch; print(torch.__version__)"` succeeds.
 3. Submit jobs from § **Full pipeline execution** below (e.g. `sbatch slurm/00_data_gen.sh`). Logs appear under **`logs/`**.
-4. If jobs fail with “conda: command not found” or “Could not find conda environment: plant”, fix **`CONDA_ROOT`** or recreate the `plant` env as above.
+4. Each `slurm/*.sh` exports **`SLURM_CONF=/etc/slurm/slurm.conf`** when that file is readable, so **`sbatch`** avoids DNS “configless” lookup failures on some login nodes.
+5. If jobs fail with “conda: command not found” or “Could not find conda environment: plant”, fix **`CONDA_ROOT`** or recreate the `plant` env as above.
 
 **Site conda instead of Miniconda:** if you prefer `module load anaconda3`, create **`plant`** with `python=3.11` there, then either symlink that env or set **`CONDA_ROOT`** to that Anaconda install’s root so `source "${CONDA_ROOT}/etc/profile.d/conda.sh"` works inside the batch scripts.
 
@@ -786,5 +787,5 @@ PLANT_GW_Paleontology/
 
 - **CPU vs GPU:** Steps 00–03 are typically CPU. Steps 04/04b and **05** (full) are best on **GPU** (05 repeatedly calls the frozen emulator’s sampler). **Order:** finish **one** of 04/04b **before** 05; Step 05 is **not** a substitute for 04/04b.
 - **Lustre constraint:** On Expanse, add `#SBATCH --constraint="lustre"` to any script if you place data on `/expanse/lustre/scratch` (Lustre is a **shared file system** tuned for large parallel reads—only relevant if your site uses it).
-- **SLURM account:** Scripts use **`#SBATCH --account=PHY260100`** (your ACCESS project ID). The long title is **not** what Slurm bills against. If jobs fail accounting checks, verify with `expanse-client user` / the portal and edit the scripts if SDSC expects a different string (e.g. lowercase or `gic-…`).
+- **SLURM account:** Scripts use **`#SBATCH --account=sdp153`**, matching the **PROJECT** field from `expanse-client user` (not the TG id **TG-PHY260100** by itself). If your allocation row shows a different PROJECT name, substitute that in every `slurm/*.sh`.
 - **Checkpoint loading (technical):** e.g. `torch.load("checkpoints/cfm_final.pt", weights_only=False)`; posterior weights are in `checkpoints/posterior_network_best.pt` under the key `state_dict`, with Λ normalisation and column order in `posterior_network_config.json`.

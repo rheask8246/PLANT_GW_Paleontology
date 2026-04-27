@@ -8,13 +8,16 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=04:00:00
-#SBATCH --account=PHY260100
+#SBATCH --account=sdp153
 #SBATCH --export=ALL
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 mkdir -p logs
 
+
+# Use cluster slurm.conf when present (avoids configless DNS SRV failures on some nodes).
+[[ -r /etc/slurm/slurm.conf ]] && export SLURM_CONF="${SLURM_CONF:-/etc/slurm/slurm.conf}"
 module purge
 module load cpu
 CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"

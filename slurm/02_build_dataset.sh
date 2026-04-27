@@ -7,15 +7,21 @@
 #SBATCH --ntasks-per-node=8
 #SBATCH --mem=32G
 #SBATCH --time=01:00:00
-#SBATCH --account=PHY260100
+#SBATCH --account=sdp153
 #SBATCH --export=ALL
 
 # Usage: sbatch slurm/02_build_dataset.sh
 # Reads the SSPC HDF5, samples events, writes parquet + normalizer + splits.
 # Run after 00_data_gen.sh completes.  ~10 min wall-time.
 
+set -euo pipefail
+
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 mkdir -p logs
+
+
+# Use cluster slurm.conf when present (avoids configless DNS SRV failures on some nodes).
+[[ -r /etc/slurm/slurm.conf ]] && export SLURM_CONF="${SLURM_CONF:-/etc/slurm/slurm.conf}"
 
 CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
 source "${CONDA_ROOT}/etc/profile.d/conda.sh"

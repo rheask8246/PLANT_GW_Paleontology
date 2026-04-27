@@ -9,7 +9,7 @@
 #SBATCH --gpus=1
 #SBATCH --mem=64G
 #SBATCH --time=24:00:00
-#SBATCH --account=PHY260100
+#SBATCH --account=sdp153
 #SBATCH --array=1-3
 #SBATCH --export=ALL
 
@@ -19,6 +19,10 @@
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 mkdir -p logs
+
+
+# Use cluster slurm.conf when present (avoids configless DNS SRV failures on some nodes).
+[[ -r /etc/slurm/slurm.conf ]] && export SLURM_CONF="${SLURM_CONF:-/etc/slurm/slurm.conf}"
 
 CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
 source "${CONDA_ROOT}/etc/profile.d/conda.sh"

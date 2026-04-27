@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=16
 #SBATCH --mem=64G
 #SBATCH --time=04:00:00
-#SBATCH --account=PHY260100
+#SBATCH --account=sdp153
 #SBATCH --export=ALL
 
 # Usage: sbatch slurm/00_data_gen.sh
@@ -16,8 +16,14 @@
 #
 # Conda: Miniconda under $HOME/miniconda3, env "plant". Override with CONDA_ROOT if needed.
 
+set -euo pipefail
+
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 mkdir -p logs data/sspc
+
+
+# Use cluster slurm.conf when present (avoids configless DNS SRV failures on some nodes).
+[[ -r /etc/slurm/slurm.conf ]] && export SLURM_CONF="${SLURM_CONF:-/etc/slurm/slurm.conf}"
 
 CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
 source "${CONDA_ROOT}/etc/profile.d/conda.sh"
