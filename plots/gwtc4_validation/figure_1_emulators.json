@@ -1,0 +1,15 @@
+{
+  "hyperparam_csv": "/expanse/lustre/scratch/rsenthilkumar/temp_project/PLANT_GW_Paleontology/hyperparam_table_encoded.csv",
+  "cfm_checkpoint": "/expanse/lustre/scratch/rsenthilkumar/temp_project/PLANT_GW_Paleontology/checkpoints/cfm_final.pt",
+  "diffusion_checkpoint": "/expanse/lustre/scratch/rsenthilkumar/temp_project/PLANT_GW_Paleontology/checkpoints/diffusion_final.pt",
+  "nbins": 60,
+  "mmax": 180.0,
+  "n_rows": 256,
+  "n_events_per_row": 256,
+  "n_boot": 12,
+  "seed": 42,
+  "vmin": 0.001,
+  "vmax": 1000.0,
+  "uncmin": 0.5,
+  "uncmax": 50.0
+}
