@@ -294,8 +294,26 @@ def sample_chieff(channel: str, n: int, rng: np.random.Generator) -> np.ndarray:
 # BPS DATA LOADING
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _is_git_lfs_pointer(path: Path) -> bool:
+    """True if `path` is a checked-in Git LFS stub instead of real file contents."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(128)
+    except OSError:
+        return False
+    return head.startswith(b"version https://git-lfs.github.com/spec/v1")
+
+
 def load_bps(path: Path) -> pd.DataFrame:
     """Load COMPAS/GROWL BPS output from HDF5 (pandas format)."""
+    if not path.is_file():
+        raise FileNotFoundError(f"BPS HDF5 not found: {path}")
+    if _is_git_lfs_pointer(path):
+        raise RuntimeError(
+            f"{path} is a Git LFS pointer (small text stub), not the real HDF5. "
+            "After clone/pull, run:  git lfs install && git lfs pull\n"
+            "Or copy the actual bps_output.h5 onto this machine / set --bps-hdf5."
+        ) from None
     df = pd.read_hdf(str(path), key="input_data")
     if "formation_channel" not in df.columns:
         raise KeyError("BPS file missing 'formation_channel' column.")
