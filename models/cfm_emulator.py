@@ -194,7 +194,7 @@ def generate_catalog(
     lam = torch.from_numpy(np.asarray(lambda_vec, dtype=np.float32))
     if lam.dim() == 1:
         lam = lam.unsqueeze(0)
-    with torch.no_grad():
+    with torch.inference_mode():
         x = model.sample(lam, n_events)
     x_np = x.cpu().numpy()
     x_denorm = denormalize_obs(x_np, normalizer)

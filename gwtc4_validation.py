@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -133,46 +135,71 @@ def _estimate_rate_grid(
         raise ValueError(f"Invalid or zero total rate in column {rate_col!r}.")
     p_row = row_rate / row_rate.sum()
 
+    import torch
+
     rng = np.random.default_rng(int(seed))
     rate_draws = np.zeros((int(n_boot), int(nbins), int(nbins)), dtype=np.float64)
 
-    for b in range(int(n_boot)):
-        # Independent stochastic draw per bootstrap (new RNG stream).
-        rng_b = np.random.default_rng(int(seed) + 100_000 * (b + 1))
-        # Sample Λ rows proportional to intrinsic rate; allow repeats.
-        rows = rng_b.choice(len(hp_df), size=int(n_rows_per_boot), replace=True, p=p_row)
+    t0 = time.time()
+    # Inference-only: slightly less overhead than no_grad(); same numerics for this sampling loop.
+    with torch.inference_mode():
+        for b in range(int(n_boot)):
+            b0 = time.time()
+            if int(n_boot) > 1:
+                print(f"[rate_grid] bootstrap {b + 1}/{int(n_boot)} ...", flush=True)
 
-        H = np.zeros((int(nbins), int(nbins)), dtype=np.float64)
-        for ri in rows:
-            lam = hp_df.iloc[int(ri)][lambda_cols].values.astype(np.float32)
-            # For reproducibility across emulators, seed torch per row per boot.
-            try:
-                import torch
+            # Independent stochastic draw per bootstrap (new RNG stream).
+            rng_b = np.random.default_rng(int(seed) + 100_000 * (b + 1))
+            # Sample Λ rows proportional to intrinsic rate; allow repeats.
+            rows = rng_b.choice(len(hp_df), size=int(n_rows_per_boot), replace=True, p=p_row)
 
-                torch.manual_seed(int(seed) + 13_337 * (b + 1) + 97 * int(ri))
-            except Exception:
-                pass
+            H = np.zeros((int(nbins), int(nbins)), dtype=np.float64)
+            for i_row, ri in enumerate(rows):
+                lam = hp_df.iloc[int(ri)][lambda_cols].values.astype(np.float32)
+                # For reproducibility across emulators, seed torch per row per boot.
+                try:
+                    torch.manual_seed(int(seed) + 13_337 * (b + 1) + 97 * int(ri))
+                except Exception:
+                    pass
 
-            cat = _generate_catalog(emulator, emulator_kind, lam, n_events_per_row, normalizer)
-            m1, m2 = _m1m2_from_catalog(cat)
+                cat = _generate_catalog(emulator, emulator_kind, lam, n_events_per_row, normalizer)
+                m1, m2 = _m1m2_from_catalog(cat)
 
-            # Convert to ln and filter range.
-            ln1 = np.log(np.clip(m1, 1.0, mmax))
-            ln2 = np.log(np.clip(m2, 1.0, mmax))
+                # Convert to ln and filter range.
+                ln1 = np.log(np.clip(m1, 1.0, mmax))
+                ln2 = np.log(np.clip(m2, 1.0, mmax))
 
-            # Weight events so total weight contributed by this Λ row is its intrinsic rate.
-            w_evt = float(row_rate[int(ri)]) / max(int(n_events_per_row), 1)
-            w = np.full_like(ln1, w_evt, dtype=np.float64)
+                # Weight events so total weight contributed by this Λ row is its intrinsic rate.
+                w_evt = float(row_rate[int(ri)]) / max(int(n_events_per_row), 1)
+                w = np.full_like(ln1, w_evt, dtype=np.float64)
 
-            # Histogram into ln bins.
-            h, _, _ = np.histogram2d(ln1, ln2, bins=(ln_edges, ln_edges), weights=w)
-            H += h
+                # Histogram into ln bins.
+                h, _, _ = np.histogram2d(ln1, ln2, bins=(ln_edges, ln_edges), weights=w)
+                H += h
 
-        # Convert sum of weights per bin to a density per dlnm1 dlnm2.
-        # Since bins are uniform in ln, divide by (Δln)^2 so values are comparable across nbins.
-        dln = float(ln_edges[1] - ln_edges[0])
-        H = H / max(dln * dln, 1e-12)
-        rate_draws[b] = H
+                # Periodic progress to keep Slurm logs alive and provide some feedback.
+                if (i_row + 1) % 64 == 0 or (i_row + 1) == len(rows):
+                    print(
+                        f"[rate_grid]  row {i_row + 1}/{len(rows)} (boot {b + 1}/{int(n_boot)})",
+                        flush=True,
+                    )
+
+            # Convert sum of weights per bin to a density per dlnm1 dlnm2.
+            # Since bins are uniform in ln, divide by (Δln)^2 so values are comparable across nbins.
+            dln = float(ln_edges[1] - ln_edges[0])
+            H = H / max(dln * dln, 1e-12)
+            rate_draws[b] = H
+
+            if int(n_boot) > 1:
+                b_elapsed = time.time() - b0
+                total_elapsed = time.time() - t0
+                boots_left = int(n_boot) - (b + 1)
+                eta = boots_left * (total_elapsed / max(b + 1, 1))
+                print(
+                    f"[rate_grid] done bootstrap {b + 1}/{int(n_boot)} in {b_elapsed:.1f}s "
+                    f"(elapsed {total_elapsed/60:.1f} min, ETA {eta/60:.1f} min)",
+                    flush=True,
+                )
 
     rate_mean = np.mean(rate_draws, axis=0)
     rate_std = np.std(rate_draws, axis=0, ddof=1) if int(n_boot) > 1 else np.zeros_like(rate_mean)
@@ -187,6 +214,31 @@ def _estimate_rate_grid(
     frac_unc = np.nan_to_num(frac_unc, nan=0.0, posinf=0.0, neginf=0.0)
 
     return RateGrid(ln_edges=ln_edges, rate=rate_mean, frac_unc=frac_unc)
+
+
+def _matplotlib_usetex_works() -> bool:
+    """
+    True if matplotlib can render at least one usetex string via the Agg backend.
+    Incomplete TeX installs (common on clusters / TinyTeX) fail here instead of at tight_layout.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    prev = bool(plt.rcParams["text.usetex"])
+    try:
+        plt.rcParams["text.usetex"] = True
+        fig = Figure(figsize=(0.6, 0.6))
+        canvas = FigureCanvasAgg(fig)
+        ax = fig.subplots()
+        ax.axis("off")
+        ax.text(0.5, 0.5, r"$\mathrm{d}x$", usetex=True, ha="center", va="center")
+        canvas.draw()
+        return True
+    except Exception:
+        return False
+    finally:
+        plt.rcParams["text.usetex"] = prev
 
 
 def _apply_figure1_style_and_save(
@@ -207,12 +259,22 @@ def _apply_figure1_style_and_save(
     from matplotlib.colors import LogNorm
     from matplotlib.patches import Polygon
 
-    if usetex:
-        try:
-            plt.rc("text", usetex=True)
-        except Exception:
-            # If TeX isn't available, fall back silently (keeps script usable on fresh machines).
-            plt.rc("text", usetex=False)
+    # rc(text, usetex=True) does not validate LaTeX; tight_layout/save can still crash (e.g. missing type1cm.sty).
+    use_tex = bool(usetex) and _matplotlib_usetex_works()
+    if use_tex:
+        plt.rc("text", usetex=True)
+    else:
+        plt.rc("text", usetex=False)
+        if usetex and ("\\textsc" in str(left_title) or "\\textsc" in str(right_title)):
+            print(
+                "[plot] LaTeX/usetex unavailable or incomplete; using matplotlib mathtext "
+                "(titles CFM / Diffusion instead of \\textsc).",
+                flush=True,
+            )
+            if "\\textsc" in str(left_title):
+                left_title = "CFM"
+            if "\\textsc" in str(right_title):
+                right_title = "Diffusion"
     plt.rc("font", family="serif", size=13)
 
     fig, axes = plt.subplots(
@@ -368,6 +430,25 @@ def main() -> None:
     p.add_argument("--no-tex", action="store_true", help="Disable LaTeX text rendering")
     args = p.parse_args()
 
+    import torch
+
+    # Match Slurm CPU allocation (Expanse gpu-shared); avoids BLAS/torch oversubscription on the host.
+    _cpt = os.environ.get("SLURM_CPUS_PER_TASK", "").strip()
+    if _cpt.isdigit():
+        _n = int(_cpt)
+        torch.set_num_threads(_n)
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
+
+    if str(args.device).lower().startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA requested (--device cuda) but torch.cuda.is_available() is False.")
+        dev = torch.device(args.device)
+        idx = 0 if dev.index is None else int(dev.index)
+        print(f"[main] CUDA device: {torch.cuda.get_device_name(idx)}", flush=True)
+
     work = _find_work_dir()
     hp_csv = args.hyperparam_csv.resolve() if args.hyperparam_csv else (work / "hyperparam_table_encoded.csv")
     ckpt_dir = args.checkpoint_dir.resolve() if args.checkpoint_dir else (work / "checkpoints")
@@ -386,7 +467,9 @@ def main() -> None:
     hp = pd.read_csv(hp_csv)
 
     # Load emulators.
+    print(f"[main] loading CFM checkpoint: {cfm_ckpt}", flush=True)
     cfm_model, cfm_lambda_cols, cfm_nrm = _load_emulator(cfm_ckpt, args.device, "cfm")
+    print(f"[main] loading Diffusion checkpoint: {dif_ckpt}", flush=True)
     dif_model, dif_lambda_cols, dif_nrm = _load_emulator(dif_ckpt, args.device, "diffusion")
 
     # Ensure lambda cols exist in hp.
@@ -398,6 +481,7 @@ def main() -> None:
             raise ValueError(f"Column {c!r} required by diffusion checkpoint is missing from {hp_csv}.")
 
     # Estimate grids.
+    print("[main] estimating CFM rate grid ...", flush=True)
     grid_cfm = _estimate_rate_grid(
         hp_df=hp,
         lambda_cols=cfm_lambda_cols,
@@ -411,6 +495,7 @@ def main() -> None:
         n_boot=args.n_boot,
         seed=args.seed,
     )
+    print("[main] estimating Diffusion rate grid ...", flush=True)
     grid_dif = _estimate_rate_grid(
         hp_df=hp,
         lambda_cols=dif_lambda_cols,
@@ -426,6 +511,7 @@ def main() -> None:
     )
 
     # Save plot with exact figure_1.py formatting.
+    print(f"[main] saving plot: {out}", flush=True)
     _apply_figure1_style_and_save(
         out_path=out,
         grid_left=grid_cfm,
