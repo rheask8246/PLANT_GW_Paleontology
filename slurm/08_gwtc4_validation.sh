@@ -9,7 +9,7 @@
 #SBATCH --gpus=1
 #SBATCH --mem=32G
 #SBATCH --constraint=lustre
-#SBATCH --time=08:00:00
+#SBATCH --time=12:00:00
 #SBATCH --account=sdp153
 #SBATCH --export=ALL
 #SBATCH --no-requeue
@@ -24,16 +24,21 @@
 # - gpu-shared billing uses max(cores, memory fraction) vs node capacity; keep requests tight.
 # - no-requeue: avoid silent restarts overwriting outputs on node failures (user guide).
 #
-# Walltime: default MC settings typically finish in a few GPU hours; 8h is buffer. Max for gpu-shared
-# is 48h if you need more.
+# Walltime: light defaults ~1–3 GPU hours; --paper-quality needs much more MC (often 8–24+ h).
+# Raise --time or use GWTC4_PAPER_QUALITY=0 with manual GWTC4_NROWS / GWTC4_NEVENTS if you hit limit.
+# Max for gpu-shared is 48h.
 #
-# Usage:
+# Usage (from repo root PLANT_GW_Paleontology/, where hyperparam_table_encoded.csv lives):
 #   sbatch slurm/08_gwtc4_validation.sh
+#
+# Paper-like smooth figure (recommended once checkpoints exist; needs scipy in env):
+#   sbatch --export=ALL,GWTC4_PAPER_QUALITY=1 slurm/08_gwtc4_validation.sh
 #
 # Optional overrides (examples):
 #   sbatch --export=ALL,GWTC4_USE_TEX=1 slurm/08_gwtc4_validation.sh   # requires full TeX (type1cm, etc.)
-#   sbatch --export=ALL,GWTC4_DEVICE=cpu slurm/08_gwtc4_validation.sh
 #   sbatch --export=ALL,GWTC4_NBOOT=4,GWTC4_NROWS=128,GWTC4_NEVENTS=128 slurm/08_gwtc4_validation.sh
+#   sbatch --export=ALL,GWTC4_OUT=plots/gwtc4_validation/run_job.pdf slurm/08_gwtc4_validation.sh
+# For longer paper-quality runs, edit #SBATCH --time above (gpu-shared allows up to 48h).
 
 set -euo pipefail
 
@@ -83,6 +88,7 @@ NEVENTS="${GWTC4_NEVENTS:-256}"
 NBINS="${GWTC4_NBINS:-60}"
 MMAX="${GWTC4_MMAX:-180.0}"
 SEED="${GWTC4_SEED:-42}"
+OUT_PATH="${GWTC4_OUT:-}"
 
 # Compute nodes often lack a full TeX stack (TinyTeX missing type1cm.sty breaks matplotlib usetex).
 # Default: mathtext only. Set GWTC4_USE_TEX=1 if you have a complete LaTeX install on the batch node.
@@ -91,15 +97,35 @@ if [[ "${GWTC4_USE_TEX:-0}" == "1" ]]; then
   NO_TEX_FLAG=""
 fi
 
+PAPER_FLAG=()
+if [[ "${GWTC4_PAPER_QUALITY:-0}" == "1" ]]; then
+  PAPER_FLAG=(--paper-quality)
+  echo "=== GWTC4_PAPER_QUALITY=1 (high MC + smoothing + auto limits + m1*m2 scale) ==="
+fi
+
+OUT_FLAG=()
+if [[ -n "${OUT_PATH}" ]]; then
+  OUT_FLAG=(--out "${OUT_PATH}")
+fi
+
+EXTRA_PY_ARGS=()
+# Space-separated extra args, e.g. GWTC4_EXTRA='--rate-q-hi 0.99 --smooth-sigma 1.5'
+if [[ -n "${GWTC4_EXTRA:-}" ]]; then
+  read -r -a EXTRA_PY_ARGS <<< "${GWTC4_EXTRA}"
+fi
+
 # -u = unbuffered stdout/stderr so logs update during long runs.
 python -u gwtc4_validation.py \
   --device "${DEVICE}" \
   ${NO_TEX_FLAG} \
+  "${PAPER_FLAG[@]}" \
+  "${OUT_FLAG[@]}" \
   --n-boot "${NBOOT}" \
   --n-rows "${NROWS}" \
   --n-events-per-row "${NEVENTS}" \
   --nbins "${NBINS}" \
   --mmax "${MMAX}" \
-  --seed "${SEED}"
+  --seed "${SEED}" \
+  "${EXTRA_PY_ARGS[@]}"
 
 echo "=== End: $(date -Is) ==="

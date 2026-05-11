@@ -22,6 +22,15 @@ stochastic draws (bootstrap over RNG seeds), reported per pixel as:
 This is **not** the GWTC-4 population posterior uncertainty; it is a
 model-output uncertainty proxy that still matches the paper figure’s visual
 grammar exactly.
+
+**Matching the paper’s smooth, full-triangle look (usually no retraining):**
+GWTC ``figure_1.py`` reads dense HDF5 grids; emulators only provide samples, so
+you need either **much more Monte Carlo** (same checkpoints, longer reruns of
+this script) or **post-bin smoothing** plus **auto color limits**. Use
+``--paper-quality`` for a sensible bundle, or tune ``--n-rows``,
+``--n-events-per-row``, ``--smooth-sigma``, ``--auto-rate-limits``. Retrain
+04/04b only if the checkpoint is an undertrained smoke model and the mass
+distribution is still wrong, not for smoothness alone.
 """
 
 from __future__ import annotations
@@ -36,6 +45,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
+
+
+def _resolve_device(s: str) -> str:
+    """``auto`` → CUDA if available, else CPU (matches typical Slurm GPU nodes)."""
+    key = str(s).lower().strip()
+    if key in ("auto", ""):
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return str(s).strip()
 
 
 def _find_work_dir() -> Path:
@@ -214,6 +233,105 @@ def _estimate_rate_grid(
     frac_unc = np.nan_to_num(frac_unc, nan=0.0, posinf=0.0, neginf=0.0)
 
     return RateGrid(ln_edges=ln_edges, rate=rate_mean, frac_unc=frac_unc)
+
+
+def _ln_bin_centers(ln_edges: np.ndarray) -> np.ndarray:
+    return 0.5 * (ln_edges[:-1] + ln_edges[1:])
+
+
+def _m1m2_scale_matrix(ln_edges: np.ndarray) -> np.ndarray:
+    """Match ``figure_1.py`` post-process ``R *= np.outer(m1, m2)`` on bin centers."""
+    ln_c = _ln_bin_centers(ln_edges)
+    m = np.exp(ln_c)
+    return np.outer(m, m)
+
+
+def _lower_triangle_mask(n: int) -> np.ndarray:
+    """True where m2-bin index <= m1-bin index (lower triangle incl. diagonal)."""
+    i = np.arange(n)[:, None]
+    j = np.arange(n)[None, :]
+    return i >= j
+
+
+def _upper_triangle_mask(n: int) -> np.ndarray:
+    """True where m2-bin index >= m1-bin index (upper triangle incl. diagonal)."""
+    i = np.arange(n)[:, None]
+    j = np.arange(n)[None, :]
+    return i <= j
+
+
+def _smooth_positive_log_field(z: np.ndarray, sigma: float) -> np.ndarray:
+    """Multiplicative smoothing: Gaussian filter on log10(z), then clip."""
+    if sigma <= 0:
+        return z
+    try:
+        from scipy.ndimage import gaussian_filter
+    except ImportError as e:
+        raise ImportError("Smoothing requires scipy (e.g. pip install scipy).") from e
+    eps = np.finfo(np.float64).tiny * 1e6
+    logz = np.log10(np.maximum(z.astype(np.float64), eps))
+    logz_s = gaussian_filter(logz, sigma=float(sigma), mode="reflect")
+    out = np.power(10.0, logz_s)
+    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _smooth_linear_field(z: np.ndarray, sigma: float) -> np.ndarray:
+    if sigma <= 0:
+        return z
+    try:
+        from scipy.ndimage import gaussian_filter
+    except ImportError as e:
+        raise ImportError("Smoothing requires scipy (e.g. pip install scipy).") from e
+    return np.nan_to_num(
+        gaussian_filter(z.astype(np.float64), sigma=float(sigma), mode="reflect"),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+
+
+def _auto_log_limits_positive(
+    z: np.ndarray,
+    mask: np.ndarray,
+    q_lo: float,
+    q_hi: float,
+    floor: float,
+) -> tuple[float, float]:
+    vals = z[mask]
+    vals = vals[np.isfinite(vals) & (vals > float(floor))]
+    if vals.size < 10:
+        return float(floor), float(max(np.max(vals), float(floor) * 10))
+    lo = float(np.quantile(vals, q_lo))
+    hi = float(np.quantile(vals, q_hi))
+    lo = max(lo, float(floor))
+    hi = max(hi, lo * 10)
+    return lo, hi
+
+
+def _postprocess_grid_for_display(
+    grid: RateGrid,
+    *,
+    smooth_sigma: float,
+    smooth_unc_sigma: float,
+    fullpop_m1m2_scale: bool,
+) -> RateGrid:
+    """
+    Optional Jacobian-style scaling (``figure_1.py`` ``R *= outer(m1,m2)`` on
+    bin centers) and Gaussian smoothing for paper-like fields.
+    """
+    ln = grid.ln_edges
+    r = np.array(grid.rate, dtype=np.float64, copy=True)
+    u = np.array(grid.frac_unc, dtype=np.float64, copy=True)
+    if fullpop_m1m2_scale:
+        r *= _m1m2_scale_matrix(ln)
+    if smooth_sigma > 0:
+        r = _smooth_positive_log_field(r, smooth_sigma)
+    if smooth_unc_sigma > 0:
+        u = _smooth_linear_field(u, smooth_unc_sigma)
+    u = np.clip(u, 1e-6, None)
+    r = np.nan_to_num(r, nan=0.0, posinf=0.0, neginf=0.0)
+    u = np.nan_to_num(u, nan=1e-6, posinf=1e6, neginf=1e-6)
+    return RateGrid(ln_edges=ln, rate=r, frac_unc=u)
 
 
 def _matplotlib_usetex_works() -> bool:
@@ -411,7 +529,12 @@ def main() -> None:
     p.add_argument("--checkpoint-dir", type=Path, default=None, help="Default: ./checkpoints")
     p.add_argument("--cfm-checkpoint", type=Path, default=None, help="Default: checkpoints/cfm_final.pt")
     p.add_argument("--diffusion-checkpoint", type=Path, default=None, help="Default: checkpoints/diffusion_final.pt")
-    p.add_argument("--device", type=str, default="cpu", help="cpu | cuda")
+    p.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="auto (prefer CUDA) | cuda | cpu",
+    )
     p.add_argument("--out", type=Path, default=None, help="Output PDF path")
 
     # Grid + Monte Carlo controls
@@ -428,7 +551,71 @@ def main() -> None:
     p.add_argument("--uncmin", type=float, default=0.5)
     p.add_argument("--uncmax", type=float, default=50.0)
     p.add_argument("--no-tex", action="store_true", help="Disable LaTeX text rendering")
+
+    p.add_argument(
+        "--paper-quality",
+        action="store_true",
+        help=(
+            "Preset: more MC draws, log-domain smoothing, auto color limits, and "
+            "m1*m2 bin scaling like figure_1.py (longer runtime; same checkpoints)."
+        ),
+    )
+    p.add_argument(
+        "--smooth-sigma",
+        type=float,
+        default=0.0,
+        help="Gaussian smoothing width (in bins) on log10(rate); 0 disables. Needs scipy.",
+    )
+    p.add_argument(
+        "--smooth-unc-sigma",
+        type=float,
+        default=0.0,
+        help="Gaussian smoothing width (in bins) on fractional uncertainty; 0 disables.",
+    )
+    p.add_argument(
+        "--fullpop-m1m2-scale",
+        action="store_true",
+        help="Multiply rate by m1*m2 at bin centers (matches figure_1.py R *= outer(m1,m2)).",
+    )
+    p.add_argument(
+        "--auto-rate-limits",
+        action="store_true",
+        help="Set rate LogNorm vmin/vmax from lower-triangle quantiles (both panels combined).",
+    )
+    p.add_argument(
+        "--auto-unc-limits",
+        action="store_true",
+        help="Set uncertainty LogNorm limits from upper-triangle quantiles (both panels combined).",
+    )
+    p.add_argument("--rate-q-lo", type=float, default=0.05, help="Lower quantile for --auto-rate-limits")
+    p.add_argument("--rate-q-hi", type=float, default=0.98, help="Upper quantile for --auto-rate-limits")
+    p.add_argument("--unc-q-lo", type=float, default=0.05, help="Lower quantile for --auto-unc-limits")
+    p.add_argument("--unc-q-hi", type=float, default=0.95, help="Upper quantile for --auto-unc-limits")
+    p.add_argument(
+        "--rate-floor",
+        type=float,
+        default=1e-30,
+        help="Ignore rate values below this when picking auto limits.",
+    )
+
     args = p.parse_args()
+
+    if args.paper_quality:
+        args.nbins = max(int(args.nbins), 90)
+        args.n_rows = max(int(args.n_rows), 1000)
+        args.n_events_per_row = max(int(args.n_events_per_row), 512)
+        args.n_boot = max(int(args.n_boot), 20)
+        if float(args.smooth_sigma) <= 0:
+            args.smooth_sigma = 1.25
+        if float(args.smooth_unc_sigma) <= 0:
+            args.smooth_unc_sigma = 0.9
+        args.auto_rate_limits = True
+        args.auto_unc_limits = True
+        args.fullpop_m1m2_scale = True
+        print(
+            "[main] --paper-quality: using high MC counts + smoothing + auto limits + m1*m2 scale",
+            flush=True,
+        )
 
     import torch
 
@@ -442,12 +629,15 @@ def main() -> None:
         except RuntimeError:
             pass
 
-    if str(args.device).lower().startswith("cuda"):
+    device = _resolve_device(args.device)
+    if str(device).lower().startswith("cuda"):
         if not torch.cuda.is_available():
-            raise RuntimeError("CUDA requested (--device cuda) but torch.cuda.is_available() is False.")
-        dev = torch.device(args.device)
+            raise RuntimeError("CUDA requested but torch.cuda.is_available() is False.")
+        dev = torch.device(device)
         idx = 0 if dev.index is None else int(dev.index)
         print(f"[main] CUDA device: {torch.cuda.get_device_name(idx)}", flush=True)
+    else:
+        print(f"[main] device: {device}", flush=True)
 
     work = _find_work_dir()
     hp_csv = args.hyperparam_csv.resolve() if args.hyperparam_csv else (work / "hyperparam_table_encoded.csv")
@@ -468,9 +658,9 @@ def main() -> None:
 
     # Load emulators.
     print(f"[main] loading CFM checkpoint: {cfm_ckpt}", flush=True)
-    cfm_model, cfm_lambda_cols, cfm_nrm = _load_emulator(cfm_ckpt, args.device, "cfm")
+    cfm_model, cfm_lambda_cols, cfm_nrm = _load_emulator(cfm_ckpt, device, "cfm")
     print(f"[main] loading Diffusion checkpoint: {dif_ckpt}", flush=True)
-    dif_model, dif_lambda_cols, dif_nrm = _load_emulator(dif_ckpt, args.device, "diffusion")
+    dif_model, dif_lambda_cols, dif_nrm = _load_emulator(dif_ckpt, device, "diffusion")
 
     # Ensure lambda cols exist in hp.
     for c in cfm_lambda_cols:
@@ -510,19 +700,58 @@ def main() -> None:
         seed=args.seed + 1,
     )
 
+    plot_cfm = _postprocess_grid_for_display(
+        grid_cfm,
+        smooth_sigma=float(args.smooth_sigma),
+        smooth_unc_sigma=float(args.smooth_unc_sigma),
+        fullpop_m1m2_scale=bool(args.fullpop_m1m2_scale),
+    )
+    plot_dif = _postprocess_grid_for_display(
+        grid_dif,
+        smooth_sigma=float(args.smooth_sigma),
+        smooth_unc_sigma=float(args.smooth_unc_sigma),
+        fullpop_m1m2_scale=bool(args.fullpop_m1m2_scale),
+    )
+
+    nbin = int(plot_cfm.rate.shape[0])
+    tri_lo = _lower_triangle_mask(nbin)
+    tri_hi = _upper_triangle_mask(nbin)
+    vmin, vmax = float(args.vmin), float(args.vmax)
+    uncmin, uncmax = float(args.uncmin), float(args.uncmax)
+    if args.auto_rate_limits:
+        rl_lo, rl_hi = _auto_log_limits_positive(
+            plot_cfm.rate, tri_lo, float(args.rate_q_lo), float(args.rate_q_hi), float(args.rate_floor)
+        )
+        rr_lo, rr_hi = _auto_log_limits_positive(
+            plot_dif.rate, tri_lo, float(args.rate_q_lo), float(args.rate_q_hi), float(args.rate_floor)
+        )
+        vmin = min(rl_lo, rr_lo)
+        vmax = max(rl_hi, rr_hi)
+        print(f"[main] auto rate limits: vmin={vmin:.3e} vmax={vmax:.3e}", flush=True)
+    if args.auto_unc_limits:
+        ul_lo, ul_hi = _auto_log_limits_positive(
+            plot_cfm.frac_unc, tri_hi, float(args.unc_q_lo), float(args.unc_q_hi), 0.5
+        )
+        ur_lo, ur_hi = _auto_log_limits_positive(
+            plot_dif.frac_unc, tri_hi, float(args.unc_q_lo), float(args.unc_q_hi), 0.5
+        )
+        uncmin = min(ul_lo, ur_lo)
+        uncmax = max(ul_hi, ur_hi)
+        print(f"[main] auto unc limits: uncmin={uncmin:.3e} uncmax={uncmax:.3e}", flush=True)
+
     # Save plot with exact figure_1.py formatting.
     print(f"[main] saving plot: {out}", flush=True)
     _apply_figure1_style_and_save(
         out_path=out,
-        grid_left=grid_cfm,
-        grid_right=grid_dif,
+        grid_left=plot_cfm,
+        grid_right=plot_dif,
         left_title=r"\textsc{CFM}" if not args.no_tex else "CFM",
         right_title=r"\textsc{Diffusion}" if not args.no_tex else "Diffusion",
         mmax=float(args.mmax),
-        vmin=float(args.vmin),
-        vmax=float(args.vmax),
-        uncmin=float(args.uncmin),
-        uncmax=float(args.uncmax),
+        vmin=float(vmin),
+        vmax=float(vmax),
+        uncmin=float(uncmin),
+        uncmax=float(uncmax),
         usetex=not bool(args.no_tex),
     )
 
@@ -536,10 +765,18 @@ def main() -> None:
         "n_events_per_row": int(args.n_events_per_row),
         "n_boot": int(args.n_boot),
         "seed": int(args.seed),
-        "vmin": float(args.vmin),
-        "vmax": float(args.vmax),
-        "uncmin": float(args.uncmin),
-        "uncmax": float(args.uncmax),
+        "device_requested": str(args.device),
+        "device_used": str(device),
+        "paper_quality": bool(args.paper_quality),
+        "smooth_sigma": float(args.smooth_sigma),
+        "smooth_unc_sigma": float(args.smooth_unc_sigma),
+        "fullpop_m1m2_scale": bool(args.fullpop_m1m2_scale),
+        "auto_rate_limits": bool(args.auto_rate_limits),
+        "auto_unc_limits": bool(args.auto_unc_limits),
+        "vmin": float(vmin),
+        "vmax": float(vmax),
+        "uncmin": float(uncmin),
+        "uncmax": float(uncmax),
     }
     meta_path = out.with_suffix(".json")
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
