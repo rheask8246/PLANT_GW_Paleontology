@@ -31,6 +31,9 @@ this script) or **post-bin smoothing** plus **auto color limits**. Use
 ``--n-events-per-row``, ``--smooth-sigma``, ``--auto-rate-limits``. Retrain
 04/04b only if the checkpoint is an undertrained smoke model and the mass
 distribution is still wrong, not for smoothness alone.
+
+LaTeX text rendering is **on by default** (``text.usetex``) when a quick probe
+succeeds; pass ``--no-tex`` to force matplotlib mathtext only (e.g. broken TeX on a node).
 """
 
 from __future__ import annotations
@@ -42,7 +45,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -359,6 +362,449 @@ def _matplotlib_usetex_works() -> bool:
         plt.rcParams["text.usetex"] = prev
 
 
+def _ensure_agg_backend() -> None:
+    """Force a non-interactive matplotlib backend (Slurm-safe)."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
+    except Exception:
+        pass
+
+
+def _import_popsummary() -> Any:
+    """Lazy import so PLANT-only runs don't require popsummary installed."""
+    try:
+        import popsummary  # type: ignore
+
+        return popsummary
+    except Exception as e:
+        raise ImportError(
+            "popsummary is required for GWTC-4 paper overlays.\n"
+            "Install it in your environment and re-run (e.g. pip install popsummary)."
+        ) from e
+
+
+def _load_gwtc4_figure1_grids(
+    data_release_dir: Path,
+    *,
+    mmax: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Load paper Figure-1 grids from popsummary.
+
+    Returns (m1, m2, full_R_scaled, full_U, bgp_R, bgp_U) truncated to m<=mmax.
+    """
+    popsummary = _import_popsummary()
+    dr = Path(data_release_dir).expanduser().resolve()
+    pdb_file = dr / "AllCBC_FullPop.h5"
+    bgp_file = dr / "AllCBC_FullPopBGP.h5"
+    if not pdb_file.exists() or not bgp_file.exists():
+        raise FileNotFoundError(
+            "Missing expected GWTC-4 data_release files:\n"
+            f"- {pdb_file}\n- {bgp_file}\n"
+            "Point --gwtc4-data-release to the folder that contains these files."
+        )
+
+    pdb_result = popsummary.popresult.PopulationResult(fname=str(pdb_file))
+    bgp_result = popsummary.popresult.PopulationResult(fname=str(bgp_file))
+
+    (m1, m2), full_R = pdb_result.get_rates_on_grids("primary_mass_secondary_mass_joint_median")
+    (_, _), full_U = pdb_result.get_rates_on_grids("primary_mass_secondary_mass_joint_uncertainty")
+    full_U = np.nan_to_num(full_U)
+    full_U = full_U + full_U.T - np.diag(np.diag(full_U))
+
+    (_, _), bgp_U = bgp_result.get_rates_on_grids("uncert_ppd_primary_and_secondary_mass")
+    (bgp_m1, bgp_m2), bgp_R = bgp_result.get_rates_on_grids("ppd_primary_and_secondary_mass")
+
+    max_ind = int(np.digitize(float(mmax), m1)) + 1
+    m1 = m1[:max_ind]
+    m2 = m2[:max_ind]
+    full_R = full_R[:max_ind, :max_ind]
+    full_U = full_U[:max_ind, :max_ind]
+
+    # Match paper display: R *= outer(m1,m2)
+    full_R = full_R * np.outer(m1, m2)
+
+    if bgp_R.shape[0] >= max_ind and bgp_R.shape[1] >= max_ind:
+        bgp_R = bgp_R[:max_ind, :max_ind]
+        bgp_U = bgp_U[:max_ind, :max_ind]
+        bgp_m1 = bgp_m1[:max_ind]
+        bgp_m2 = bgp_m2[:max_ind]
+        _ = (bgp_m1, bgp_m2)
+
+    return m1, m2, full_R, full_U, bgp_R, bgp_U
+
+
+def _plot_figure1_compare(
+    *,
+    out_path: Path,
+    mmax: float,
+    vmin: float,
+    vmax: float,
+    uncmin: float,
+    uncmax: float,
+    usetex: bool,
+    compare_mode: str,
+    paper_fullpop: Optional[tuple[np.ndarray, np.ndarray]] = None,
+    paper_bgp: Optional[tuple[np.ndarray, np.ndarray]] = None,
+    plant_cfm: Optional[RateGrid] = None,
+    plant_diff: Optional[RateGrid] = None,
+) -> None:
+    """
+    Figure-1 style plot with paper panels (FullPop/BGP) and PLANT panels (CFM/Diffusion).
+
+    compare_mode:
+      - panels: 4 side-by-side panels when both are available.
+      - overlay: paper panels with PLANT rate contours (quick visual check).
+    """
+    _ensure_agg_backend()
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+    from matplotlib.patches import Polygon
+
+    if compare_mode not in ("panels", "overlay"):
+        raise ValueError("compare_mode must be 'panels' or 'overlay'")
+
+    use_tex = bool(usetex) and _matplotlib_usetex_works()
+    plt.rc("text", usetex=use_tex)
+    plt.rc("font", family="serif", size=13)
+
+    have_paper = paper_fullpop is not None and paper_bgp is not None
+    have_plant = plant_cfm is not None and plant_diff is not None
+
+    if compare_mode == "overlay" and not (have_paper and have_plant):
+        raise ValueError("overlay mode requires both paper grids and PLANT grids.")
+
+    if have_paper and have_plant:
+        titles = [r"\textsc{FullPop}-4.0", "BGP", r"\textsc{CFM}", r"\textsc{Diffusion}"]
+        panels: list[tuple[np.ndarray, np.ndarray]] = [
+            (paper_fullpop[0], paper_fullpop[1]),
+            (paper_bgp[0], paper_bgp[1]),
+            (plant_cfm.rate, plant_cfm.frac_unc.T),
+            (plant_diff.rate, plant_diff.frac_unc.T),
+        ]
+    elif have_paper:
+        titles = [r"\textsc{FullPop}-4.0", "BGP"]
+        panels = [(paper_fullpop[0], paper_fullpop[1]), (paper_bgp[0], paper_bgp[1])]
+    elif have_plant:
+        titles = [r"\textsc{CFM}", r"\textsc{Diffusion}"]
+        panels = [(plant_cfm.rate, plant_cfm.frac_unc.T), (plant_diff.rate, plant_diff.frac_unc.T)]
+    else:
+        raise ValueError("Nothing to plot (need paper and/or PLANT inputs).")
+
+    if compare_mode == "overlay":
+        titles = [r"\textsc{FullPop}-4.0 + PLANT contours", "BGP + PLANT contours"]
+        panels = [(paper_fullpop[0], paper_fullpop[1]), (paper_bgp[0], paper_bgp[1])]
+
+    n_center = len(panels)
+    fig_w = 10 if n_center <= 2 else 14
+    fig, axes = plt.subplots(
+        ncols=n_center + 2,
+        figsize=(fig_w, 4),
+        width_ratios=[0.075] + [1] * n_center + [0.075],
+    )
+    cax_unc = axes[0]
+    cax_rate = axes[-1]
+    axs = list(axes[1:-1])
+
+    majors = [1, 3, 10, 30, 100]
+    major_names = ["1", "3", "10", "30", "100"]
+    xticks = np.log(np.concatenate((np.arange(1, 10), np.arange(10, 110, 10))))
+    extent = (0.0, float(np.log(mmax)), 0.0, float(np.log(mmax)))
+
+    last_rate = None
+    last_unc = None
+    for ax, (R, U), title in zip(axs, panels, titles):
+        im_rate = ax.imshow(
+            R,
+            cmap="Blues",
+            norm=LogNorm(vmin=float(vmin), vmax=float(vmax)),
+            origin="lower",
+            extent=extent,
+        )
+        im_unc = ax.imshow(
+            U,
+            cmap="Reds",
+            norm=LogNorm(vmin=float(uncmin), vmax=float(uncmax)),
+            origin="lower",
+            extent=extent,
+        )
+        last_rate = im_rate
+        last_unc = im_unc
+
+        im_rate.set_clip_path(
+            Polygon(
+                np.array([[np.log(1), np.log(1)], [np.log(mmax), np.log(1)], [np.log(mmax), np.log(mmax)]]),
+                closed=True,
+                transform=ax.transData,
+            )
+        )
+        im_unc.set_clip_path(
+            Polygon(
+                np.array([[np.log(1), np.log(1)], [np.log(1), np.log(mmax)], [np.log(mmax), np.log(mmax)]]),
+                closed=True,
+                transform=ax.transData,
+            )
+        )
+
+        ax.set_xticks(xticks, minor=True)
+        ax.set_yticks(xticks, minor=True)
+        ax.set_xticks(np.log(np.array(majors)), major_names, minor=False)
+        ax.set_yticks(np.log(np.array(majors)), major_names, minor=False)
+        ax.set_xlabel(r"$m_1$ [$M_\odot$]")
+        ax.grid(ls=":", alpha=0.5, lw=1, color="k")
+        ax.set_title(title)
+
+    axs[0].set_ylabel(r"$m_2$ [$M_\odot$]")
+
+    if compare_mode == "overlay" and have_plant:
+        # Contours on top of the paper maps (rate only).
+        levels = np.logspace(np.log10(max(float(vmin), 1e-30)), np.log10(float(vmax)), 6)
+        axs[0].contour(plant_cfm.rate, levels=levels, colors="gold", linewidths=0.8, alpha=0.8, origin="lower", extent=extent)
+        axs[1].contour(plant_diff.rate, levels=levels, colors="gold", linewidths=0.8, alpha=0.8, origin="lower", extent=extent)
+
+    if last_rate is None or last_unc is None:
+        raise RuntimeError("No images drawn.")
+
+    n_order = int(np.log10(float(vmax) / float(vmin)) + 0.01)
+    cbar_rate = fig.colorbar(last_rate, cax=cax_rate, ticks=np.logspace(np.log10(vmin), np.log10(vmax), n_order + 1))
+    cbar_unc = fig.colorbar(last_unc, cax=cax_unc)
+
+    tick_spacing = 2
+    tick_labels = []
+    for i, x in enumerate(np.linspace(np.log10(vmin), np.log10(vmax), n_order + 1, dtype=int)):
+        tick_labels.append(f"$10^{{{x}}}$" if i % tick_spacing == 0 else "")
+    cbar_rate.ax.set_yticklabels(tick_labels)
+    cbar_rate.set_label(
+        r"$\frac{\mathrm{d}\mathcal{R}}{\mathrm{d}(\ln m_1)\mathrm{d}(\ln m_2)}$ [Gpc${}^{-3}$ yr${}^{-1}$]",
+        rotation=90,
+    )
+    cbar_unc.set_label("Fractional uncertainty", rotation=90)
+    cbar_rate.ax.yaxis.set_label_position("left")
+    cbar_unc.ax.yaxis.set_label_position("left")
+
+    plt.tight_layout(pad=0.0, w_pad=0, h_pad=1.0)
+
+    for ax in (cax_unc, cax_rate):
+        pos = ax.get_position()
+        yscale = pos.y1 - pos.y0
+        w = 0.051
+        ax.set_position([pos.x0 * 0.95, pos.y0 + yscale * w, pos.x1 - pos.x0, yscale * (1 - 2 * w)])
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+
+
+def _estimate_1d_marginals_from_emulator(
+    *,
+    hp_df,
+    lambda_cols: List[str],
+    emulator,
+    emulator_kind: str,
+    normalizer: Dict[str, Any],
+    m_edges: np.ndarray,
+    n_rows_per_boot: int,
+    n_events_per_row: int,
+    n_boot: int,
+    seed: int,
+    m_clip_hi: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (m_centers, dRdm1_draws, dRdm2_draws), each (n_boot, nbins) except centers."""
+    rate_col = _grid_rate_column(list(hp_df.columns))
+    if rate_col not in hp_df.columns:
+        raise ValueError(f"Missing per-row rate column {rate_col!r} in hyperparameter table.")
+    row_rate = np.asarray(hp_df[rate_col].values, dtype=np.float64)
+    row_rate = np.clip(row_rate, 0.0, None)
+    if row_rate.sum() <= 0:
+        raise ValueError(f"Invalid total rate in {rate_col!r}.")
+    p_row = row_rate / row_rate.sum()
+
+    nbins = len(m_edges) - 1
+    m_centers = 0.5 * (m_edges[:-1] + m_edges[1:])
+
+    import torch
+
+    d1 = np.zeros((int(n_boot), nbins), dtype=np.float64)
+    d2 = np.zeros((int(n_boot), nbins), dtype=np.float64)
+    for b in range(int(n_boot)):
+        rng_b = np.random.default_rng(int(seed) + 100_000 * (b + 1))
+        rows = rng_b.choice(len(hp_df), size=int(n_rows_per_boot), replace=True, p=p_row)
+        h1 = np.zeros(nbins, dtype=np.float64)
+        h2 = np.zeros(nbins, dtype=np.float64)
+        with torch.inference_mode():
+            for ri in rows:
+                lam = hp_df.iloc[int(ri)][lambda_cols].values.astype(np.float32)
+                try:
+                    torch.manual_seed(int(seed) + 13_337 * (b + 1) + 97 * int(ri))
+                except Exception:
+                    pass
+                cat = _generate_catalog(emulator, emulator_kind, lam, int(n_events_per_row), normalizer)
+                m1, m2 = _m1m2_from_catalog(cat)
+                m1 = np.clip(m1, 1.0, float(m_clip_hi))
+                m2 = np.clip(m2, 1.0, float(m_clip_hi))
+                w_evt = float(row_rate[int(ri)]) / max(int(n_events_per_row), 1)
+                w = np.full_like(m1, w_evt, dtype=np.float64)
+                h1 += np.histogram(m1, bins=m_edges, weights=w)[0]
+                h2 += np.histogram(m2, bins=m_edges, weights=w)[0]
+        widths = np.diff(m_edges).astype(np.float64)
+        d1[b] = h1 / np.clip(widths, 1e-12, None)
+        d2[b] = h2 / np.clip(widths, 1e-12, None)
+
+    return m_centers, d1, d2
+
+
+def _plot_figure2_compare(
+    *,
+    out_path: Path,
+    data_release_dir: Optional[Path],
+    plant_cfm_marg: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]],
+    plant_diff_marg: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]],
+    xlim: tuple[float, float],
+    ylim: tuple[float, float],
+    usetex: bool,
+) -> None:
+    _ensure_agg_backend()
+    import matplotlib.pyplot as plt
+
+    use_tex = bool(usetex) and _matplotlib_usetex_works()
+    plt.rc("text", usetex=use_tex)
+    plt.rc("font", family="serif", size=13)
+
+    fig, axes = plt.subplots(nrows=2, figsize=(10, 8))
+    color_full = "#648FFF"
+    color_bgp = "#FE6100"
+    color_cfm = "#785EF0"
+    color_dif = "#DC267F"
+
+    if data_release_dir is not None:
+        popsummary = _import_popsummary()
+        dr = Path(data_release_dir).expanduser().resolve()
+        pdb_file = dr / "AllCBC_FullPop.h5"
+        bgp_file = dr / "AllCBC_FullPopBGP.h5"
+        pdb_result = popsummary.popresult.PopulationResult(fname=str(pdb_file))
+        bgp_result = popsummary.popresult.PopulationResult(fname=str(bgp_file))
+        mass_key = ["primary_mass", "secondary_mass"]
+        for ii in range(2):
+            ax = axes[ii]
+            pdb_m, pdb_Rm = pdb_result.get_rates_on_grids(mass_key[ii])
+            bgp_m, bgp_Rm = bgp_result.get_rates_on_grids(mass_key[ii])
+            ax.fill_between(pdb_m[0], np.percentile(pdb_Rm, 5, axis=0), np.percentile(pdb_Rm, 95, axis=0), color=color_full, alpha=0.25, rasterized=True)
+            ax.fill_between(bgp_m[0], np.percentile(bgp_Rm, 5, axis=0), np.percentile(bgp_Rm, 95, axis=0), color=color_bgp, alpha=0.25, rasterized=True)
+            ax.plot(pdb_m[0], np.mean(pdb_Rm, axis=0), color=color_full, label=r"\textsc{FullPop}-4.0")
+            ax.plot(bgp_m[0], np.mean(bgp_Rm, axis=0), color=color_bgp, label="BGP")
+
+    def _plot_plant(ax, marg, color, label, which: str) -> None:
+        if marg is None:
+            return
+        m, d1, d2 = marg
+        y = d1 if which == "m1" else d2
+        ax.fill_between(m, np.percentile(y, 5, axis=0), np.percentile(y, 95, axis=0), color=color, alpha=0.18, rasterized=True)
+        ax.plot(m, np.mean(y, axis=0), color=color, lw=1.4, label=label)
+
+    _plot_plant(axes[0], plant_cfm_marg, color_cfm, "PLANT CFM", "m1")
+    _plot_plant(axes[0], plant_diff_marg, color_dif, "PLANT Diffusion", "m1")
+    _plot_plant(axes[1], plant_cfm_marg, color_cfm, "PLANT CFM", "m2")
+    _plot_plant(axes[1], plant_diff_marg, color_dif, "PLANT Diffusion", "m2")
+
+    for ii in range(2):
+        ax = axes[ii]
+        ax.set_yscale("log")
+        ax.set_ylim(float(ylim[0]), float(ylim[1]))
+        ax.set_xlim(float(xlim[0]), float(xlim[1]))
+        ax.grid(ls=":", alpha=0.2, lw=1, color="k")
+        if ii == 0:
+            ax.set_ylabel(r"$\mathrm{d}\mathcal{R}/\mathrm{d}m_1$ [Gpc${}^{-3}$ yr${}^{-1} M_\odot^{-1}$]")
+            ax.set_xlabel(r"$m_1$ [$M_\odot$]")
+        else:
+            ax.set_ylabel(r"$\mathrm{d}\mathcal{R}/\mathrm{d}m_2$ [Gpc${}^{-3}$ yr${}^{-1} M_\odot^{-1}$]")
+            ax.set_xlabel(r"$m_2$ [$M_\odot$]")
+
+    axes[0].legend(frameon=True, loc="upper right")
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_figure3_compare(
+    *,
+    out_path: Path,
+    data_release_dir: Optional[Path],
+    gwtc3_dir: Optional[Path],
+    plant_marg: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]],
+    usetex: bool,
+) -> None:
+    _ensure_agg_backend()
+    import matplotlib.pyplot as plt
+
+    use_tex = bool(usetex) and _matplotlib_usetex_works()
+    plt.rc("text", usetex=use_tex)
+    plt.rc("font", family="serif", size=13)
+
+    fig = plt.figure(figsize=(11, 4.5), tight_layout=True)
+    ax = plt.subplot(111)
+    plt.subplots_adjust(bottom=0.2)
+
+    pf = None
+    try:
+        # Import the paper's helper if present in this repo.
+        fig_script_dir = Path(__file__).resolve().parent.parent / "gwtc4" / "o4a-astro" / "figure_scripts"
+        if fig_script_dir.exists() and str(fig_script_dir) not in sys.path:
+            sys.path.insert(0, str(fig_script_dir))
+        import plot_funcs_bbh_mass as pf  # type: ignore
+
+        pf.setup()
+        pf.setup_mass_plot(ax, grid_kwargs=dict(ls="dotted", color="k", alpha=0), xrange=(2, 100), yrange=(1e-3, 40))
+    except Exception:
+        pf = None
+        ax.grid(ls=":", alpha=0.2)
+        ax.set_yscale("log")
+        ax.set_xlim(2, 100)
+        ax.set_ylim(1e-3, 40)
+
+    if data_release_dir is not None and pf is not None:
+        popsummary = _import_popsummary()
+        dr = Path(data_release_dir).expanduser().resolve()
+        bptp = dr / "BBHMassSpinRedshift_BrokenPowerLawTwoPeaks_GaussianComponentSpins_PowerLawRedshift.h5"
+        bs = dr / "BBHMassSpinRedshift_BSplineIID.h5"
+        if bptp.exists() and bs.exists():
+            bptp_o4 = popsummary.popresult.PopulationResult(str(bptp))
+            bs_o4 = popsummary.popresult.PopulationResult(str(bs))
+            bptp_m1, bptp_pdfs = pf.get_params(bptp_o4, "mass_1")
+            bs_m1, bs_pdfs = pf.get_params(bs_o4, "rate_vs_mass_1_at_z0-2", rate=False)
+            pf.plot_90CI(ax, bs_m1, bs_pdfs, color="#648FFF", label=r"\textsc{B-Spline}, \textsc{GWTC-4.0}", fill_alpha=0.35)
+            pf.plot_90CI(ax, bptp_m1, bptp_pdfs, color="#FE6100", label=r"\textsc{Broken Power Law + 2 Peaks}, \textsc{GWTC-4.0}", fill_alpha=0.35)
+
+    if gwtc3_dir is not None and pf is not None:
+        try:
+            g3 = Path(gwtc3_dir).expanduser().resolve()
+            plp_m1, plplow, plppd, plphi = pf.get_03b_plp_ppds(str(g3))
+            ax.plot(plp_m1, plppd, color="k", lw=1.5, alpha=0.5, ls="-")
+            ax.plot(plp_m1, plplow, color="k", lw=0.75, alpha=0.7, ls="--", label=r"\textsc{Power Law + Peak}, \textsc{GWTC-3.0}")
+            ax.plot(plp_m1, plphi, color="k", lw=0.75, alpha=0.7, ls="--")
+        except Exception:
+            pass
+
+    if plant_marg is not None:
+        m, d1, _d2 = plant_marg
+        lo = np.percentile(d1, 5, axis=0)
+        hi = np.percentile(d1, 95, axis=0)
+        mu = np.mean(d1, axis=0)
+        ax.fill_between(m, lo, hi, color="#DC267F", alpha=0.18, label="PLANT (bootstrap band)")
+        ax.plot(m, mu, color="#DC267F", lw=1.5)
+
+    ax.set_xlabel(r"$m_1$ [$M_\odot$]")
+    ax.grid(ls=":", alpha=0.2)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(handles, labels, frameon=True)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
 def _apply_figure1_style_and_save(
     *,
     out_path: Path,
@@ -524,81 +970,76 @@ def _apply_figure1_style_and_save(
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Recreate GWTC-4 Figure 1 style plot from PLANT emulator outputs.")
+    p = argparse.ArgumentParser(
+        description="GWTC-4 Figure 1/2/3 comparison plots (paper popsummary vs PLANT emulators)."
+    )
+    p.add_argument("--figs", type=str, default="1,2,3", help="Comma-separated subset: 1,2,3 (default all).")
+    p.add_argument(
+        "--compare-mode",
+        type=str,
+        default="panels",
+        choices=("panels", "overlay"),
+        help="Figure-1 comparison: panels (side-by-side) or overlay (PLANT contours on paper).",
+    )
+
+    p.add_argument(
+        "--gwtc4-data-release",
+        type=Path,
+        default=None,
+        help="Path to GWTC-4 Zenodo 'data_release' directory (contains AllCBC_FullPop*.h5, etc.).",
+    )
+    p.add_argument(
+        "--gwtc3-powerlawpeak-dir",
+        type=Path,
+        default=None,
+        help="Optional GWTC-3 PowerLawPeak directory for Figure-3 black comparison curves.",
+    )
+
     p.add_argument("--hyperparam-csv", type=Path, default=None)
     p.add_argument("--checkpoint-dir", type=Path, default=None, help="Default: ./checkpoints")
     p.add_argument("--cfm-checkpoint", type=Path, default=None, help="Default: checkpoints/cfm_final.pt")
     p.add_argument("--diffusion-checkpoint", type=Path, default=None, help="Default: checkpoints/diffusion_final.pt")
-    p.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        help="auto (prefer CUDA) | cuda | cpu",
-    )
-    p.add_argument("--out", type=Path, default=None, help="Output PDF path")
+    p.add_argument("--device", type=str, default="auto", help="auto | cuda | cpu")
+    p.add_argument("--out-dir", type=Path, default=None, help="Output directory (default: ./plots/gwtc4_compare/)")
 
-    # Grid + Monte Carlo controls
-    p.add_argument("--nbins", type=int, default=60, help="Histogram bins per axis in ln m")
-    p.add_argument("--mmax", type=float, default=180.0, help="Max mass for plot in Msun")
-    p.add_argument("--n-rows", type=int, default=256, help="Number of hyperparameter rows sampled per bootstrap")
+    p.add_argument("--nbins", type=int, default=60, help="Histogram bins per axis in ln m (Figure 1)")
+    p.add_argument("--mmax", type=float, default=180.0, help="Max mass for Figure-1 axis in Msun")
+    p.add_argument("--n-rows", type=int, default=256, help="Hyperparameter rows sampled per bootstrap")
     p.add_argument("--n-events-per-row", type=int, default=256, help="Synthetic events per sampled row")
-    p.add_argument("--n-boot", type=int, default=12, help="Number of stochastic repeats for uncertainty")
+    p.add_argument("--n-boot", type=int, default=12, help="Bootstrap repeats for uncertainty bands")
     p.add_argument("--seed", type=int, default=42)
 
-    # Match paper-like display ranges (formatting), adjustable if needed.
     p.add_argument("--vmin", type=float, default=1e-3)
     p.add_argument("--vmax", type=float, default=1e3)
     p.add_argument("--uncmin", type=float, default=0.5)
     p.add_argument("--uncmax", type=float, default=50.0)
-    p.add_argument("--no-tex", action="store_true", help="Disable LaTeX text rendering")
+
+    p.add_argument("--m12-max", type=float, default=15.0, help="Max mass for Figure-2 x-axis (paper uses 15)")
+    p.add_argument("--m12-bins", type=int, default=70, help="Number of linear bins for Figure-2 curves")
 
     p.add_argument(
-        "--paper-quality",
+        "--no-tex",
         action="store_true",
-        help=(
-            "Preset: more MC draws, log-domain smoothing, auto color limits, and "
-            "m1*m2 bin scaling like figure_1.py (longer runtime; same checkpoints)."
-        ),
+        help="Disable LaTeX (matplotlib mathtext only). By default LaTeX is used when available.",
     )
-    p.add_argument(
-        "--smooth-sigma",
-        type=float,
-        default=0.0,
-        help="Gaussian smoothing width (in bins) on log10(rate); 0 disables. Needs scipy.",
-    )
-    p.add_argument(
-        "--smooth-unc-sigma",
-        type=float,
-        default=0.0,
-        help="Gaussian smoothing width (in bins) on fractional uncertainty; 0 disables.",
-    )
-    p.add_argument(
-        "--fullpop-m1m2-scale",
-        action="store_true",
-        help="Multiply rate by m1*m2 at bin centers (matches figure_1.py R *= outer(m1,m2)).",
-    )
-    p.add_argument(
-        "--auto-rate-limits",
-        action="store_true",
-        help="Set rate LogNorm vmin/vmax from lower-triangle quantiles (both panels combined).",
-    )
-    p.add_argument(
-        "--auto-unc-limits",
-        action="store_true",
-        help="Set uncertainty LogNorm limits from upper-triangle quantiles (both panels combined).",
-    )
-    p.add_argument("--rate-q-lo", type=float, default=0.05, help="Lower quantile for --auto-rate-limits")
-    p.add_argument("--rate-q-hi", type=float, default=0.98, help="Upper quantile for --auto-rate-limits")
-    p.add_argument("--unc-q-lo", type=float, default=0.05, help="Lower quantile for --auto-unc-limits")
-    p.add_argument("--unc-q-hi", type=float, default=0.95, help="Upper quantile for --auto-unc-limits")
-    p.add_argument(
-        "--rate-floor",
-        type=float,
-        default=1e-30,
-        help="Ignore rate values below this when picking auto limits.",
-    )
+
+    p.add_argument("--paper-quality", action="store_true", help="Preset: higher MC + smoothing + auto limits + m1*m2 scaling.")
+    p.add_argument("--smooth-sigma", type=float, default=0.0, help="Gaussian smoothing width (bins) on log10(rate). Needs scipy.")
+    p.add_argument("--smooth-unc-sigma", type=float, default=0.0, help="Gaussian smoothing width (bins) on uncertainty. Needs scipy.")
+    p.add_argument("--fullpop-m1m2-scale", action="store_true", help="Multiply PLANT rate by m1*m2 at bin centers (paper FullPop display).")
+    p.add_argument("--auto-rate-limits", action="store_true", help="Auto rate limits from quantiles (PLANT only).")
+    p.add_argument("--auto-unc-limits", action="store_true", help="Auto uncertainty limits from quantiles (PLANT only).")
+    p.add_argument("--rate-q-lo", type=float, default=0.05)
+    p.add_argument("--rate-q-hi", type=float, default=0.98)
+    p.add_argument("--unc-q-lo", type=float, default=0.05)
+    p.add_argument("--unc-q-hi", type=float, default=0.95)
+    p.add_argument("--rate-floor", type=float, default=1e-30)
 
     args = p.parse_args()
+
+    figs = {s.strip() for s in str(args.figs).split(",") if s.strip()}
+    if not figs.issubset({"1", "2", "3"}):
+        raise ValueError("--figs must be a subset of 1,2,3 (e.g. '1,2').")
 
     if args.paper_quality:
         args.nbins = max(int(args.nbins), 90)
@@ -612,14 +1053,10 @@ def main() -> None:
         args.auto_rate_limits = True
         args.auto_unc_limits = True
         args.fullpop_m1m2_scale = True
-        print(
-            "[main] --paper-quality: using high MC counts + smoothing + auto limits + m1*m2 scale",
-            flush=True,
-        )
+        print("[main] --paper-quality enabled", flush=True)
 
     import torch
 
-    # Match Slurm CPU allocation (Expanse gpu-shared); avoids BLAS/torch oversubscription on the host.
     _cpt = os.environ.get("SLURM_CPUS_PER_TASK", "").strip()
     if _cpt.isdigit():
         _n = int(_cpt)
@@ -645,10 +1082,8 @@ def main() -> None:
     cfm_ckpt = args.cfm_checkpoint.resolve() if args.cfm_checkpoint else (ckpt_dir / "cfm_final.pt")
     dif_ckpt = args.diffusion_checkpoint.resolve() if args.diffusion_checkpoint else (ckpt_dir / "diffusion_final.pt")
 
-    if args.out is None:
-        out = work / "plots" / "gwtc4_validation" / "figure_1_emulators.pdf"
-    else:
-        out = args.out.resolve()
+    out_dir = args.out_dir.resolve() if args.out_dir else (work / "plots" / "gwtc4_compare")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     import pandas as pd
 
@@ -656,13 +1091,14 @@ def main() -> None:
         raise FileNotFoundError(f"Missing hyperparameter table: {hp_csv}")
     hp = pd.read_csv(hp_csv)
 
-    # Load emulators.
+    need_plant = True
+    need_paper = args.gwtc4_data_release is not None
+
     print(f"[main] loading CFM checkpoint: {cfm_ckpt}", flush=True)
     cfm_model, cfm_lambda_cols, cfm_nrm = _load_emulator(cfm_ckpt, device, "cfm")
     print(f"[main] loading Diffusion checkpoint: {dif_ckpt}", flush=True)
     dif_model, dif_lambda_cols, dif_nrm = _load_emulator(dif_ckpt, device, "diffusion")
 
-    # Ensure lambda cols exist in hp.
     for c in cfm_lambda_cols:
         if c not in hp.columns:
             raise ValueError(f"Column {c!r} required by CFM checkpoint is missing from {hp_csv}.")
@@ -670,119 +1106,168 @@ def main() -> None:
         if c not in hp.columns:
             raise ValueError(f"Column {c!r} required by diffusion checkpoint is missing from {hp_csv}.")
 
-    # Estimate grids.
-    print("[main] estimating CFM rate grid ...", flush=True)
-    grid_cfm = _estimate_rate_grid(
-        hp_df=hp,
-        lambda_cols=cfm_lambda_cols,
-        emulator=cfm_model,
-        emulator_kind="cfm",
-        normalizer=cfm_nrm,
-        nbins=args.nbins,
-        mmax=args.mmax,
-        n_rows_per_boot=args.n_rows,
-        n_events_per_row=args.n_events_per_row,
-        n_boot=args.n_boot,
-        seed=args.seed,
-    )
-    print("[main] estimating Diffusion rate grid ...", flush=True)
-    grid_dif = _estimate_rate_grid(
-        hp_df=hp,
-        lambda_cols=dif_lambda_cols,
-        emulator=dif_model,
-        emulator_kind="diffusion",
-        normalizer=dif_nrm,
-        nbins=args.nbins,
-        mmax=args.mmax,
-        n_rows_per_boot=args.n_rows,
-        n_events_per_row=args.n_events_per_row,
-        n_boot=args.n_boot,
-        seed=args.seed + 1,
-    )
+    plot_cfm: Optional[RateGrid] = None
+    plot_dif: Optional[RateGrid] = None
+    cfm_marg: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
+    dif_marg: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
 
-    plot_cfm = _postprocess_grid_for_display(
-        grid_cfm,
-        smooth_sigma=float(args.smooth_sigma),
-        smooth_unc_sigma=float(args.smooth_unc_sigma),
-        fullpop_m1m2_scale=bool(args.fullpop_m1m2_scale),
-    )
-    plot_dif = _postprocess_grid_for_display(
-        grid_dif,
-        smooth_sigma=float(args.smooth_sigma),
-        smooth_unc_sigma=float(args.smooth_unc_sigma),
-        fullpop_m1m2_scale=bool(args.fullpop_m1m2_scale),
-    )
-
-    nbin = int(plot_cfm.rate.shape[0])
-    tri_lo = _lower_triangle_mask(nbin)
-    tri_hi = _upper_triangle_mask(nbin)
     vmin, vmax = float(args.vmin), float(args.vmax)
     uncmin, uncmax = float(args.uncmin), float(args.uncmax)
-    if args.auto_rate_limits:
-        rl_lo, rl_hi = _auto_log_limits_positive(
-            plot_cfm.rate, tri_lo, float(args.rate_q_lo), float(args.rate_q_hi), float(args.rate_floor)
-        )
-        rr_lo, rr_hi = _auto_log_limits_positive(
-            plot_dif.rate, tri_lo, float(args.rate_q_lo), float(args.rate_q_hi), float(args.rate_floor)
-        )
-        vmin = min(rl_lo, rr_lo)
-        vmax = max(rl_hi, rr_hi)
-        print(f"[main] auto rate limits: vmin={vmin:.3e} vmax={vmax:.3e}", flush=True)
-    if args.auto_unc_limits:
-        ul_lo, ul_hi = _auto_log_limits_positive(
-            plot_cfm.frac_unc, tri_hi, float(args.unc_q_lo), float(args.unc_q_hi), 0.5
-        )
-        ur_lo, ur_hi = _auto_log_limits_positive(
-            plot_dif.frac_unc, tri_hi, float(args.unc_q_lo), float(args.unc_q_hi), 0.5
-        )
-        uncmin = min(ul_lo, ur_lo)
-        uncmax = max(ul_hi, ur_hi)
-        print(f"[main] auto unc limits: uncmin={uncmin:.3e} uncmax={uncmax:.3e}", flush=True)
 
-    # Save plot with exact figure_1.py formatting.
-    print(f"[main] saving plot: {out}", flush=True)
-    _apply_figure1_style_and_save(
-        out_path=out,
-        grid_left=plot_cfm,
-        grid_right=plot_dif,
-        left_title=r"\textsc{CFM}" if not args.no_tex else "CFM",
-        right_title=r"\textsc{Diffusion}" if not args.no_tex else "Diffusion",
-        mmax=float(args.mmax),
-        vmin=float(vmin),
-        vmax=float(vmax),
-        uncmin=float(uncmin),
-        uncmax=float(uncmax),
-        usetex=not bool(args.no_tex),
-    )
+    if "1" in figs:
+        print("[main] estimating PLANT Figure-1 grids ...", flush=True)
+        grid_cfm = _estimate_rate_grid(
+            hp_df=hp,
+            lambda_cols=cfm_lambda_cols,
+            emulator=cfm_model,
+            emulator_kind="cfm",
+            normalizer=cfm_nrm,
+            nbins=args.nbins,
+            mmax=args.mmax,
+            n_rows_per_boot=args.n_rows,
+            n_events_per_row=args.n_events_per_row,
+            n_boot=args.n_boot,
+            seed=args.seed,
+        )
+        grid_dif = _estimate_rate_grid(
+            hp_df=hp,
+            lambda_cols=dif_lambda_cols,
+            emulator=dif_model,
+            emulator_kind="diffusion",
+            normalizer=dif_nrm,
+            nbins=args.nbins,
+            mmax=args.mmax,
+            n_rows_per_boot=args.n_rows,
+            n_events_per_row=args.n_events_per_row,
+            n_boot=args.n_boot,
+            seed=args.seed + 1,
+        )
+        plot_cfm = _postprocess_grid_for_display(
+            grid_cfm,
+            smooth_sigma=float(args.smooth_sigma),
+            smooth_unc_sigma=float(args.smooth_unc_sigma),
+            fullpop_m1m2_scale=bool(args.fullpop_m1m2_scale),
+        )
+        plot_dif = _postprocess_grid_for_display(
+            grid_dif,
+            smooth_sigma=float(args.smooth_sigma),
+            smooth_unc_sigma=float(args.smooth_unc_sigma),
+            fullpop_m1m2_scale=bool(args.fullpop_m1m2_scale),
+        )
+
+        nbin = int(plot_cfm.rate.shape[0])
+        tri_lo = _lower_triangle_mask(nbin)
+        tri_hi = _upper_triangle_mask(nbin)
+        if args.auto_rate_limits:
+            rl_lo, rl_hi = _auto_log_limits_positive(plot_cfm.rate, tri_lo, float(args.rate_q_lo), float(args.rate_q_hi), float(args.rate_floor))
+            rr_lo, rr_hi = _auto_log_limits_positive(plot_dif.rate, tri_lo, float(args.rate_q_lo), float(args.rate_q_hi), float(args.rate_floor))
+            vmin = min(rl_lo, rr_lo)
+            vmax = max(rl_hi, rr_hi)
+            print(f"[main] auto rate limits: vmin={vmin:.3e} vmax={vmax:.3e}", flush=True)
+        if args.auto_unc_limits:
+            ul_lo, ul_hi = _auto_log_limits_positive(plot_cfm.frac_unc, tri_hi, float(args.unc_q_lo), float(args.unc_q_hi), 0.5)
+            ur_lo, ur_hi = _auto_log_limits_positive(plot_dif.frac_unc, tri_hi, float(args.unc_q_lo), float(args.unc_q_hi), 0.5)
+            uncmin = min(ul_lo, ur_lo)
+            uncmax = max(ul_hi, ur_hi)
+            print(f"[main] auto unc limits: uncmin={uncmin:.3e} uncmax={uncmax:.3e}", flush=True)
+
+    if ("2" in figs) or ("3" in figs):
+        print("[main] estimating PLANT Figure-2/3 marginals ...", flush=True)
+        m_edges = np.linspace(1.0, float(args.m12_max), int(args.m12_bins) + 1)
+        cfm_marg = _estimate_1d_marginals_from_emulator(
+            hp_df=hp,
+            lambda_cols=cfm_lambda_cols,
+            emulator=cfm_model,
+            emulator_kind="cfm",
+            normalizer=cfm_nrm,
+            m_edges=m_edges,
+            n_rows_per_boot=args.n_rows,
+            n_events_per_row=args.n_events_per_row,
+            n_boot=args.n_boot,
+            seed=args.seed + 10,
+            m_clip_hi=float(args.m12_max),
+        )
+        dif_marg = _estimate_1d_marginals_from_emulator(
+            hp_df=hp,
+            lambda_cols=dif_lambda_cols,
+            emulator=dif_model,
+            emulator_kind="diffusion",
+            normalizer=dif_nrm,
+            m_edges=m_edges,
+            n_rows_per_boot=args.n_rows,
+            n_events_per_row=args.n_events_per_row,
+            n_boot=args.n_boot,
+            seed=args.seed + 11,
+            m_clip_hi=float(args.m12_max),
+        )
+
+    paper_fullpop = paper_bgp = None
+    if need_paper and ("1" in figs):
+        print("[main] loading paper Figure-1 grids ...", flush=True)
+        _m1, _m2, full_R, full_U, bgp_R, bgp_U = _load_gwtc4_figure1_grids(args.gwtc4_data_release, mmax=float(args.mmax))
+        paper_fullpop = (full_R, full_U.T)
+        paper_bgp = (bgp_R, bgp_U.T)
+
+    outputs: list[Path] = []
+    if "1" in figs:
+        out1 = out_dir / f"figure_1_compare_{args.compare_mode}.pdf"
+        _plot_figure1_compare(
+            out_path=out1,
+            mmax=float(args.mmax),
+            vmin=float(vmin),
+            vmax=float(vmax),
+            uncmin=float(uncmin),
+            uncmax=float(uncmax),
+            usetex=not bool(args.no_tex),
+            compare_mode=str(args.compare_mode),
+            paper_fullpop=paper_fullpop,
+            paper_bgp=paper_bgp,
+            plant_cfm=plot_cfm,
+            plant_diff=plot_dif,
+        )
+        outputs.append(out1)
+
+    if "2" in figs:
+        out2 = out_dir / "figure_2_compare.pdf"
+        _plot_figure2_compare(
+            out_path=out2,
+            data_release_dir=args.gwtc4_data_release,
+            plant_cfm_marg=cfm_marg,
+            plant_diff_marg=dif_marg,
+            xlim=(1.0, float(args.m12_max)),
+            ylim=(1e-2, 2e3),
+            usetex=not bool(args.no_tex),
+        )
+        outputs.append(out2)
+
+    if "3" in figs:
+        out3 = out_dir / "figure_3_compare.pdf"
+        _plot_figure3_compare(
+            out_path=out3,
+            data_release_dir=args.gwtc4_data_release,
+            gwtc3_dir=args.gwtc3_powerlawpeak_dir,
+            plant_marg=cfm_marg,
+            usetex=not bool(args.no_tex),
+        )
+        outputs.append(out3)
 
     meta = {
+        "figs": sorted(list(figs)),
+        "compare_mode": str(args.compare_mode),
         "hyperparam_csv": str(hp_csv),
         "cfm_checkpoint": str(cfm_ckpt),
         "diffusion_checkpoint": str(dif_ckpt),
-        "nbins": int(args.nbins),
-        "mmax": float(args.mmax),
-        "n_rows": int(args.n_rows),
-        "n_events_per_row": int(args.n_events_per_row),
-        "n_boot": int(args.n_boot),
-        "seed": int(args.seed),
-        "device_requested": str(args.device),
-        "device_used": str(device),
-        "paper_quality": bool(args.paper_quality),
-        "smooth_sigma": float(args.smooth_sigma),
-        "smooth_unc_sigma": float(args.smooth_unc_sigma),
-        "fullpop_m1m2_scale": bool(args.fullpop_m1m2_scale),
-        "auto_rate_limits": bool(args.auto_rate_limits),
-        "auto_unc_limits": bool(args.auto_unc_limits),
-        "vmin": float(vmin),
-        "vmax": float(vmax),
-        "uncmin": float(uncmin),
-        "uncmax": float(uncmax),
+        "gwtc4_data_release": str(args.gwtc4_data_release) if args.gwtc4_data_release else None,
+        "gwtc3_powerlawpeak_dir": str(args.gwtc3_powerlawpeak_dir) if args.gwtc3_powerlawpeak_dir else None,
+        "usetex_requested": not bool(args.no_tex),
+        "outputs": [str(p) for p in outputs],
     }
-    meta_path = out.with_suffix(".json")
+    meta_path = out_dir / "compare_run_metadata.json"
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    print(f"Wrote: {out}")
-    print(f"Wrote: {meta_path}")
+    for o in outputs:
+        print(f"Wrote: {o}", flush=True)
+    print(f"Wrote: {meta_path}", flush=True)
 
 
 if __name__ == "__main__":
