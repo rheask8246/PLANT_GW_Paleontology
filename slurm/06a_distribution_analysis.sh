@@ -26,4 +26,4 @@ CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
 source "${CONDA_ROOT}/etc/profile.d/conda.sh"
 conda activate plant
 
-python data_distribution_analysis.py --sspc-hdf5 data/sspc/models_sspc.hdf5
+python scripts/data_distribution_analysis.py --sspc-hdf5 data/sspc/models_sspc.hdf5

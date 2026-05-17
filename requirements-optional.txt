@@ -1,2 +1,8 @@
 # Optional dependencies (install on top of requirements.txt if needed).
 sbi>=0.22.0
+
+# SSPC (Synthetic Stellar Pop Convolve): used by 00_sspc_data_generation.py for
+# Madau–Dickinson SFR + COMPAS log-skew-normal metallicity.  Either clone
+# https://gitlab.com/dhendriks/syntheticstellarpopconvolve next to this repo, or:
+#   pip install syntheticstellarpopconvolve
+# (see SSPC requirements.txt for voluptuous, tables, … if the package import path is used).

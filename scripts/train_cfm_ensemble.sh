@@ -19,7 +19,7 @@ for i in $(seq 1 "$K"); do
   SEED=$((1000 + i * 17))
   OUT="checkpoints/ensemble_cfm/${i}/cfm_final.pt"
   echo "=== member ${i}/${K}  seed=${SEED}  -> ${OUT} ==="
-  python 04_cfm_emulator.py \
+  python scripts/04_cfm_emulator.py \
     --output-checkpoint "$OUT" \
     --seed "$SEED" \
     --device "${DEVICE:-cpu}" \

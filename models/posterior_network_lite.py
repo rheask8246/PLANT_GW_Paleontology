@@ -7,7 +7,7 @@ subsamples of 02’s parquet files (see PopFlow proposal Stage 2 → 4).
 
 **Theta (9-d):** `SSPC_THETA_PARAM_COLS` / `03_rate_network` — channel fixed by row.
 
-**Events (8-d per row):** z-scored observables + four σ-broadcasts from the same
+**Events (6-d per row):** z-scored observables + three σ-broadcasts from the same
 `obs_normalizer` dict bundled in the 04/04b checkpoint.
 """
 from __future__ import annotations
@@ -45,7 +45,7 @@ class SetTransformerEncoder(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 8,
+        input_dim: int = 6,
         hidden_dim: int = 128,
         ffn_dim: int = 512,
         num_layers: int = 2,
@@ -233,7 +233,7 @@ class PosteriorNet(nn.Module):
 
     def __init__(
         self,
-        event_input_dim: int = 8,
+        event_input_dim: int = 6,
         theta_dim: int = THETA_DIM,
         hidden_dim: int = 128,
         ffn_dim: int = 512,
@@ -293,7 +293,7 @@ class PosteriorNet(nn.Module):
     ) -> torch.Tensor:
         """
         theta: (B, K) in **physical** units (same as CSV)
-        events: (B, L, 8)
+        events: (B, L, 6)
         event_mask: (B, L)
         -> (B,)
         """
@@ -312,7 +312,7 @@ class PosteriorNet(nn.Module):
         num_samples: int = 1000,
     ) -> torch.Tensor:
         """
-        events: (B, L, 8), event_mask: (B, L)
+        events: (B, L, 6), event_mask: (B, L)
         -> (B, num_samples, K) physical units
         """
         self.eval()
@@ -336,7 +336,7 @@ class LitePosteriorNet(PosteriorNet):
 
     def __init__(self) -> None:
         super().__init__(
-            event_input_dim=8,
+            event_input_dim=6,
             theta_dim=THETA_DIM,
             hidden_dim=128,
             ffn_dim=512,

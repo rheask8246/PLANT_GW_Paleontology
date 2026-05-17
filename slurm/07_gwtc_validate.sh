@@ -34,7 +34,7 @@ if [[ ! -f "$CSV" ]]; then
   exit 1
 fi
 
-python 07_gwtc_posterior_validate.py \
+python scripts/07_gwtc_posterior_validate.py \
     --events-csv "$CSV" \
     --checkpoint-dir checkpoints \
     --model full \

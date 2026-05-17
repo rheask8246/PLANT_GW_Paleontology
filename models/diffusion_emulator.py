@@ -1,7 +1,7 @@
 """
 Diffusion Emulator: DDPM for conditional merger event generation.
 
-Takes hyperparameter vector Λ and generates (mchirp, q, chieff, z) events.
+Takes hyperparameter vector Λ and generates (mchirp, q, z) events.
 Uses same normalization as CFM for direct comparison.
 """
 
@@ -18,7 +18,7 @@ import torch.nn as nn
 def normalize_obs(obs: np.ndarray, normalizer: Dict, columns: list = None) -> np.ndarray:
     """Same as cfm_emulator.normalize_obs."""
     if columns is None:
-        columns = ["mchirp", "q", "chieff", "z"]
+        columns = ["mchirp", "q", "z"]
     out = np.zeros_like(obs, dtype=np.float32)
     for i, col in enumerate(columns):
         x = obs[:, i].astype(np.float64)
@@ -32,7 +32,7 @@ def normalize_obs(obs: np.ndarray, normalizer: Dict, columns: list = None) -> np
 def denormalize_obs(obs: np.ndarray, normalizer: Dict, columns: list = None) -> np.ndarray:
     """Same as cfm_emulator.denormalize_obs."""
     if columns is None:
-        columns = ["mchirp", "q", "chieff", "z"]
+        columns = ["mchirp", "q", "z"]
     out = np.zeros_like(obs, dtype=np.float64)
     for i, col in enumerate(columns):
         x = obs[:, i].astype(np.float64)
@@ -69,7 +69,7 @@ class DenoisingNet(nn.Module):
 
     def __init__(self, context_dim: int = 128, hidden_dim: int = 256, dropout: float = 0.1):
         super().__init__()
-        self.input_dim = 4 + 1 + context_dim  # x_t(4) + t(1) + context
+        self.input_dim = 3 + 1 + context_dim  # x_t(3) + t(1) + context
         self.net = nn.Sequential(
             nn.Linear(self.input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -83,7 +83,7 @@ class DenoisingNet(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 4),
+            nn.Linear(hidden_dim, 3),
         )
 
     def forward(
@@ -92,7 +92,7 @@ class DenoisingNet(nn.Module):
         t: torch.Tensor,
         context: torch.Tensor,
     ) -> torch.Tensor:
-        """Predict epsilon. x: (..., 4), t: (..., 1) or (...,), context: (..., 128)."""
+        """Predict epsilon. x: (..., 3), t: (..., 1) or (...,), context: (..., 128)."""
         if t.dim() == x.dim() - 1:
             t = t.unsqueeze(-1)
         inp = torch.cat([x, t, context], dim=-1)
@@ -138,7 +138,7 @@ class DiffusionEmulator(nn.Module):
         t: torch.Tensor,
         lambda_vec: torch.Tensor,
     ) -> torch.Tensor:
-        """Predict noise epsilon. x: (..., 4), t: (...,) in [0, n_timesteps-1]."""
+        """Predict noise epsilon. x: (..., 3), t: (...,) in [0, n_timesteps-1]."""
         t_norm = t.float() / (self.n_timesteps - 1)  # [0, 1] for network
         context = self._encode_context(lambda_vec, x)
         if t.dim() == 1 and x.dim() == 3:
@@ -195,7 +195,7 @@ class DiffusionEmulator(nn.Module):
         if lambda_vec.dim() == 1:
             lambda_vec = lambda_vec.unsqueeze(0)
 
-        x = torch.randn(1, n_samples, 4, device=device, dtype=lambda_vec.dtype)
+        x = torch.randn(1, n_samples, 3, device=device, dtype=lambda_vec.dtype)
         for t in reversed(range(self.n_timesteps)):
             x = self.p_sample_step(x, t, lambda_vec)
         return x.squeeze(0)
@@ -219,7 +219,6 @@ def generate_catalog(
     x_np = x.cpu().numpy()
     x_denorm = denormalize_obs(x_np, normalizer)
     x_denorm[:, 1] = np.clip(x_denorm[:, 1], 0.0, 1.0)
-    x_denorm[:, 2] = np.clip(x_denorm[:, 2], -1.0, 1.0)
-    x_denorm[:, 3] = np.maximum(x_denorm[:, 3], 1e-6)
+    x_denorm[:, 2] = np.maximum(x_denorm[:, 2], 1e-6)
     x_denorm[:, 0] = np.maximum(x_denorm[:, 0], 1e-2)
-    return pd.DataFrame(x_denorm, columns=["mchirp", "q", "chieff", "z"])
+    return pd.DataFrame(x_denorm, columns=["mchirp", "q", "z"])

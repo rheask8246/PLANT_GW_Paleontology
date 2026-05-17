@@ -40,7 +40,7 @@ conda activate plant
 module purge
 module load gpu
 
-python 05_posterior_network.py \
+python scripts/05_posterior_network.py \
     --emulator cfm \
     --emulator-checkpoint checkpoints/cfm_final.pt \
     --model full \

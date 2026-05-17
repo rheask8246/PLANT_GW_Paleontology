@@ -18,7 +18,7 @@ class FullPosteriorNet(PosteriorNet):
 
     def __init__(self) -> None:
         super().__init__(
-            event_input_dim=8,
+            event_input_dim=6,
             theta_dim=THETA_DIM,
             hidden_dim=512,
             ffn_dim=2048,

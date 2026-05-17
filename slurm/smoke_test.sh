@@ -32,7 +32,7 @@ module purge
 module load gpu
 
 echo "=== CFM smoke test ==="
-python 04_cfm_emulator.py --smoke-test --steps 500 --device cuda
+python scripts/04_cfm_emulator.py --smoke-test --steps 500 --device cuda
 
 echo "=== Diffusion smoke test ==="
-python 04b_diffusion_emulator.py --smoke-test --steps 500 --device cuda
+python scripts/04b_diffusion_emulator.py --smoke-test --steps 500 --device cuda

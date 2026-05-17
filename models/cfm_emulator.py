@@ -1,7 +1,7 @@
 """
 CFM Emulator: Conditional Flow Matching for merger event generation.
 
-Takes hyperparameter vector Λ and generates (mchirp, q, chieff, z) events.
+Takes hyperparameter vector Λ and generates (mchirp, q, z) events.
 """
 
 from __future__ import annotations
@@ -21,12 +21,12 @@ def normalize_obs(obs: np.ndarray, normalizer: Dict, columns: list = None) -> np
 
     mchirp, z: log10(x) FIRST, then x_norm = (log10(x) - mean) / std
               (mean, std match 02’s `all_events` / obs_normalizer.json)
-    q, chieff: x_norm = (x - mean) / std directly
+    q: x_norm = (x - mean) / std directly
 
-    obs: (N, 4) with columns [mchirp, q, chieff, z]
+    obs: (N, 3) with columns [mchirp, q, z]
     """
     if columns is None:
-        columns = ["mchirp", "q", "chieff", "z"]
+        columns = ["mchirp", "q", "z"]
     out = np.zeros_like(obs, dtype=np.float32)
     for i, col in enumerate(columns):
         x = obs[:, i].astype(np.float64)
@@ -41,10 +41,10 @@ def denormalize_obs(obs: np.ndarray, normalizer: Dict, columns: list = None) -> 
     """
     Denormalize observables back to physical units.
     Inverts normalize_obs: x_denorm = 10^(x_norm * std + mean) for mchirp, z;
-    x_denorm = x_norm * std + mean for q, chieff.
+    x_denorm = x_norm * std + mean for q.
     """
     if columns is None:
-        columns = ["mchirp", "q", "chieff", "z"]
+        columns = ["mchirp", "q", "z"]
     out = np.zeros_like(obs, dtype=np.float64)
     for i, col in enumerate(columns):
         x = obs[:, i].astype(np.float64)
@@ -81,7 +81,7 @@ class VectorFieldNet(nn.Module):
 
     def __init__(self, context_dim: int = 128, hidden_dim: int = 256, dropout: float = 0.1):
         super().__init__()
-        self.input_dim = 4 + 1 + context_dim  # x(4) + t(1) + context
+        self.input_dim = 3 + 1 + context_dim  # x(3) + t(1) + context
         self.net = nn.Sequential(
             nn.Linear(self.input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -95,7 +95,7 @@ class VectorFieldNet(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 4),
+            nn.Linear(hidden_dim, 3),
         )
 
     def forward(
@@ -104,7 +104,7 @@ class VectorFieldNet(nn.Module):
         t: torch.Tensor,
         context: torch.Tensor,
     ) -> torch.Tensor:
-        """x: (..., 4), t: (..., 1) or (...,), context: (..., 128)."""
+        """x: (..., 3), t: (..., 1) or (...,), context: (..., 128)."""
         if t.dim() == x.dim() - 1:
             t = t.unsqueeze(-1)
         inp = torch.cat([x, t, context], dim=-1)
@@ -126,10 +126,10 @@ class CFMEmulator(nn.Module):
         t: torch.Tensor,
         lambda_vec: torch.Tensor,
     ) -> torch.Tensor:
-        """Predict velocity dx/dt. x: (..., 4), t: (...,), lambda_vec: (..., D_lambda)."""
+        """Predict velocity dx/dt. x: (..., 3), t: (...,), lambda_vec: (..., D_lambda)."""
         context = self.encoder(lambda_vec)
         if context.dim() == 2 and x.dim() == 3:
-            # x: (B, N, 4), context: (B, 128) -> expand context to (B, N, 128)
+            # x: (B, N, 3), context: (B, 128) -> expand context to (B, N, 128)
             context = context.unsqueeze(1).expand(-1, x.shape[1], -1)
             t = t.unsqueeze(1).expand(-1, x.shape[1]) if t.dim() == 1 else t
         return self.vector_field(x, t, context)
@@ -147,10 +147,10 @@ class CFMEmulator(nn.Module):
         if lambda_vec.dim() == 1:
             lambda_vec = lambda_vec.unsqueeze(0)
 
-        x0 = torch.randn(1, n_samples, 4, device=device, dtype=lambda_vec.dtype)
+        x0 = torch.randn(1, n_samples, 3, device=device, dtype=lambda_vec.dtype)
 
         def ode_fn(t, x):
-            # t is scalar, x is (1, n_samples, 4)
+            # t is scalar, x is (1, n_samples, 3)
             t_flat = torch.full((x.shape[0], x.shape[1]), t.item(), device=x.device, dtype=x.dtype)
             return self.forward(x, t_flat, lambda_vec)
 
@@ -187,7 +187,7 @@ def generate_catalog(
         model      : trained CFMEmulator
         normalizer : loaded from obs_normalizer.json
     Returns:
-        catalog : pd.DataFrame with columns [mchirp, q, chieff, z]
+        catalog : pd.DataFrame with columns [mchirp, q, z]
                   values are in ORIGINAL (denormalized) units
     """
     model.eval()
@@ -200,7 +200,6 @@ def generate_catalog(
     x_denorm = denormalize_obs(x_np, normalizer)
     # Clamp to physical bounds (model may extrapolate slightly)
     x_denorm[:, 1] = np.clip(x_denorm[:, 1], 0.0, 1.0)   # q in [0, 1]
-    x_denorm[:, 2] = np.clip(x_denorm[:, 2], -1.0, 1.0)  # chieff in [-1, 1]
-    x_denorm[:, 3] = np.maximum(x_denorm[:, 3], 1e-6)    # z > 0
+    x_denorm[:, 2] = np.maximum(x_denorm[:, 2], 1e-6)    # z > 0
     x_denorm[:, 0] = np.maximum(x_denorm[:, 0], 1e-2)    # mchirp > 0
-    return pd.DataFrame(x_denorm, columns=["mchirp", "q", "chieff", "z"])
+    return pd.DataFrame(x_denorm, columns=["mchirp", "q", "z"])

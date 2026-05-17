@@ -10,11 +10,11 @@
 #SBATCH --account=sdp153
 #SBATCH --export=ALL
 
-# Usage: sbatch slurm/00_data_gen.sh
+# Usage (from PLANT_GW_Paleontology/):  sbatch slurm/00_data_gen.sh
 # Generates the full SSPC event HDF5 (50x50 grid per channel, 50k events each).
 # ~3h wall-time; ~48 CPU-hours.
 #
-# Conda: Miniconda under $HOME/miniconda3, env "plant". Override with CONDA_ROOT if needed.
+# Python: uses project .venv311 if present (install SSPC there). Override:  PYTHON=/path/to/python sbatch …
 
 set -euo pipefail
 
@@ -25,14 +25,15 @@ mkdir -p logs data/sspc
 # Use cluster slurm.conf when present (avoids configless DNS SRV failures on some nodes).
 [[ -r /etc/slurm/slurm.conf ]] && export SLURM_CONF="${SLURM_CONF:-/etc/slurm/slurm.conf}"
 
-CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
-source "${CONDA_ROOT}/etc/profile.d/conda.sh"
-conda activate plant
-
 module purge
 module load cpu
 
-python 00_sspc_data_generation.py \
+PYTHON="${PYTHON:-${PWD}/.venv311/bin/python}"
+[[ -x "$PYTHON" ]] || PYTHON="python"
+
+# Optional: --bps-hdf5 /path/to/bps_output.h5  (default: data/bps_output.h5)
+
+$PYTHON scripts/00_sspc_data_generation.py \
     --n-sfra 50 \
     --n-mu0  50 \
     --n-events 50000 \

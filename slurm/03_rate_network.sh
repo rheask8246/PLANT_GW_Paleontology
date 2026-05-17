@@ -30,7 +30,7 @@ conda activate plant
 module purge
 module load cpu
 
-python 03_rate_network.py \
+python scripts/03_rate_network.py \
     --epochs 2000 \
     --patience 200 \
     --device cpu

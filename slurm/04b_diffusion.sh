@@ -26,13 +26,12 @@ mkdir -p logs
 # Use cluster slurm.conf when present (avoids configless DNS SRV failures on some nodes).
 [[ -r /etc/slurm/slurm.conf ]] && export SLURM_CONF="${SLURM_CONF:-/etc/slurm/slurm.conf}"
 
-CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
-source "${CONDA_ROOT}/etc/profile.d/conda.sh"
-conda activate plant
-
 module purge
 module load gpu
 
-python 04b_diffusion_emulator.py \
+PYTHON="${PYTHON:-${PWD}/.venv311/bin/python}"
+[[ -x "$PYTHON" ]] || PYTHON="python"
+
+$PYTHON scripts/04b_diffusion_emulator.py \
     --steps 100000 \
     --device cuda

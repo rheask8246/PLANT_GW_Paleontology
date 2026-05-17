@@ -17,7 +17,7 @@ for i in $(seq 1 "$K"); do
   ECHK="checkpoints/ensemble_cfm/${i}/cfm_final.pt"
   POUT="checkpoints/posterior_ensemble/${i}/posterior_network_best.pt"
   echo "=== posterior ${i}/${K}  emulator=${ECHK}  -> ${POUT} ==="
-  python 05_posterior_network.py \
+  python scripts/05_posterior_network.py \
     --emulator cfm \
     --emulator-checkpoint "$ECHK" \
     --output-checkpoint-pt "$POUT" \

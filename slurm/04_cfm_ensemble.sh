@@ -35,7 +35,7 @@ i="${SLURM_ARRAY_TASK_ID}"
 SEED=$((1000 + i * 17))
 OUT="checkpoints/ensemble_cfm/${i}/cfm_final.pt"
 
-python 04_cfm_emulator.py \
+python scripts/04_cfm_emulator.py \
     --output-checkpoint "$OUT" \
     --seed "$SEED" \
     --device cuda \

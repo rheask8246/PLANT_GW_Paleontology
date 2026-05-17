@@ -28,16 +28,21 @@
 # Raise --time or use GWTC4_PAPER_QUALITY=0 with manual GWTC4_NROWS / GWTC4_NEVENTS if you hit limit.
 # Max for gpu-shared is 48h.
 #
-# Usage (from repo root PLANT_GW_Paleontology/, where hyperparam_table_encoded.csv lives):
+# Quick Figure-2-only smoke (low MC): `slurm/08_smoke_gwtc4_fig2.sh` (needs GWTC4_DATA_RELEASE).
+#
+# Usage (from repo root PLANT_GW_Paleontology/, data/hyperparam_table_encoded.csv):
+#
+# **o4a-astro / GWTC-4.0 population (Zenodo 16911563):** unpack `data_release/` and point Slurm at it:
+#   export GWTC4_DATA_RELEASE=/path/to/data_release   # must contain AllCBC_FullPop*.h5, AllCBC_FullPopBGP*.h5
 #   sbatch slurm/08_gwtc4_validation.sh
 #
 # Paper-like smooth figure (recommended once checkpoints exist; needs scipy in env):
-#   sbatch --export=ALL,GWTC4_PAPER_QUALITY=1 slurm/08_gwtc4_validation.sh
+#   sbatch --export=ALL,GWTC4_DATA_RELEASE=/path/to/data_release,GWTC4_PAPER_QUALITY=1 slurm/08_gwtc4_validation.sh
 #
 # Optional overrides (examples):
 #   sbatch --export=ALL,GWTC4_USE_TEX=1 slurm/08_gwtc4_validation.sh   # requires full TeX (type1cm, etc.)
 #   sbatch --export=ALL,GWTC4_NBOOT=4,GWTC4_NROWS=128,GWTC4_NEVENTS=128 slurm/08_gwtc4_validation.sh
-#   sbatch --export=ALL,GWTC4_OUT=plots/gwtc4_validation/run_job.pdf slurm/08_gwtc4_validation.sh
+#   sbatch --export=ALL,GWTC4_OUT_DIR=plots/gwtc4_validation/my_run slurm/08_gwtc4_validation.sh
 # For longer paper-quality runs, edit #SBATCH --time above (gpu-shared allows up to 48h).
 
 set -euo pipefail
@@ -88,7 +93,11 @@ NEVENTS="${GWTC4_NEVENTS:-256}"
 NBINS="${GWTC4_NBINS:-60}"
 MMAX="${GWTC4_MMAX:-180.0}"
 SEED="${GWTC4_SEED:-42}"
-OUT_PATH="${GWTC4_OUT:-}"
+OUT_DIR="${GWTC4_OUT_DIR:-${GWTC4_OUT:-}}"
+DATA_REL="${GWTC4_DATA_RELEASE:-}"
+GWTC3_DIR="${GWTC3_POWERLAWPEAK_DIR:-}"
+FIGS="${GWTC4_FIGS:-1,2,3}"
+COMPARE="${GWTC4_COMPARE_MODE:-panels}"
 
 # Compute nodes often lack a full TeX stack (TinyTeX missing type1cm.sty breaks matplotlib usetex).
 # Default: mathtext only. Set GWTC4_USE_TEX=1 if you have a complete LaTeX install on the batch node.
@@ -104,8 +113,20 @@ if [[ "${GWTC4_PAPER_QUALITY:-0}" == "1" ]]; then
 fi
 
 OUT_FLAG=()
-if [[ -n "${OUT_PATH}" ]]; then
-  OUT_FLAG=(--out "${OUT_PATH}")
+if [[ -n "${OUT_DIR}" ]]; then
+  OUT_FLAG=(--out-dir "${OUT_DIR}")
+fi
+
+DATA_FLAG=()
+if [[ -n "${DATA_REL}" ]]; then
+  DATA_FLAG=(--gwtc4-data-release "${DATA_REL}")
+else
+  echo "WARNING: GWTC4_DATA_RELEASE is unset — figures will be PLANT-only (no o4a / popsummary overlays)." >&2
+fi
+
+GWTC3_FLAG=()
+if [[ -n "${GWTC3_DIR}" ]]; then
+  GWTC3_FLAG=(--gwtc3-powerlawpeak-dir "${GWTC3_DIR}")
 fi
 
 EXTRA_PY_ARGS=()
@@ -115,11 +136,15 @@ if [[ -n "${GWTC4_EXTRA:-}" ]]; then
 fi
 
 # -u = unbuffered stdout/stderr so logs update during long runs.
-python -u gwtc4_validation.py \
+python -u scripts/gwtc4_validation.py \
   --device "${DEVICE}" \
   ${NO_TEX_FLAG} \
   "${PAPER_FLAG[@]}" \
   "${OUT_FLAG[@]}" \
+  "${DATA_FLAG[@]}" \
+  "${GWTC3_FLAG[@]}" \
+  --figs "${FIGS}" \
+  --compare-mode "${COMPARE}" \
   --n-boot "${NBOOT}" \
   --n-rows "${NROWS}" \
   --n-events-per-row "${NEVENTS}" \

@@ -35,7 +35,7 @@ i="${SLURM_ARRAY_TASK_ID}"
 ECHK="checkpoints/ensemble_cfm/${i}/cfm_final.pt"
 POUT="checkpoints/posterior_ensemble/${i}/posterior_network_best.pt"
 
-python 05_posterior_network.py \
+python scripts/05_posterior_network.py \
     --emulator cfm \
     --emulator-checkpoint "$ECHK" \
     --output-checkpoint-pt "$POUT" \
