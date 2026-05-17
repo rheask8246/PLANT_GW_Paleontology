@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Figure-2-style marginal mass-rate curves from SSPC (training grid subset).
+Step 00 — Figure-2-style SSPC marginal mass-rate curves (training-grid subset).
 
 Mimics `o4a-astro/figure_scripts/figure_2.py` layout (two stacked panels, log y,
 x in [1, 15] Msun, serif, similar axis labels) but replaces FullPop/BGP curves
@@ -20,6 +20,9 @@ the smooth GWTC-4 figure-2 *style* while staying on a low-*z* SSPC slice (defaul
 
 This is **not** the GWTC-4.0 detected population rate (no p_det, different
 cosmology/units); it is the same *visual grammar* as figure 2 for SSPC diagnostics.
+
+Usage: ``python scripts/analysis/00_fig2_spread.py``
+SLURM: ``slurm/09_fig2_spread.sh``
 """
 
 from __future__ import annotations
@@ -27,9 +30,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path as _Path
 
-_PROJECT_ROOT = _Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+_ANALYSIS_DIR = _Path(__file__).resolve().parent
+_PROJECT_ROOT = _ANALYSIS_DIR.parents[2]
+for _p in (_PROJECT_ROOT, _ANALYSIS_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from plant_paths import (  # noqa: E402
     HYPERPARAM_TABLE_CSV,
@@ -38,6 +43,7 @@ from plant_paths import (  # noqa: E402
     ensure_paths,
     find_data_dir,
     ml_data_dir,
+    resolve_plot_output,
 )
 
 ensure_paths()
@@ -54,7 +60,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from data_distribution_analysis import m1_from_mchirp_q
+from lib.distribution import m1_from_mchirp_q
 
 
 
@@ -340,7 +346,11 @@ def main() -> None:
     )
 
     plt.tight_layout(rect=(0, 0.14, 1, 0.93))
-    out = args.out.resolve() if args.out else (work / "plots" / "fig2_sspc_spread.pdf")
+    out = (
+        args.out.resolve()
+        if args.out
+        else resolve_plot_output(Path(__file__), filename="fig2_sspc_spread.pdf")
+    )
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=160, bbox_inches="tight")
     plt.close(fig)

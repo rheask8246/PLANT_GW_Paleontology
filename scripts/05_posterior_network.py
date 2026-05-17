@@ -38,6 +38,7 @@ from plant_paths import (  # noqa: E402
     SPLITS_JSON,
     ensure_paths,
     ml_data_dir,
+    plot_run_dir,
 )
 
 ensure_paths()
@@ -518,8 +519,7 @@ def main() -> None:
                 break
 
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    plot_d = PROJECT_ROOT / "plots" / "posterior_network" / ts
-    plot_d.mkdir(parents=True, exist_ok=True)
+    plot_d = plot_run_dir(Path(__file__), timestamp=ts)
     try:
         import matplotlib
         matplotlib.use("Agg")

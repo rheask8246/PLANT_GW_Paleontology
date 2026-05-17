@@ -14,9 +14,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path as _Path
 
-_PROJECT_ROOT = _Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+_ANALYSIS_DIR = _Path(__file__).resolve().parent
+_PROJECT_ROOT = _ANALYSIS_DIR.parents[2]
+for _p in (_PROJECT_ROOT, _ANALYSIS_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from plant_paths import (  # noqa: E402
     PROJECT_ROOT,
@@ -26,6 +28,7 @@ from plant_paths import (  # noqa: E402
     find_data_dir,
     find_work_dir,
     load_posterior_network_module,
+    plot_run_dir,
 )
 
 ensure_paths()
@@ -49,7 +52,6 @@ _05 = load_posterior_network_module()
 build_events_6d = _05.build_events_6d
 load_frozen_emulator = _05.load_frozen_emulator
 
-_DEFAULT_OUT = PROJECT_ROOT / "plots" / "gwtc_validation"
 
 
 def _find_col(df: pd.DataFrame, options: Tuple[str, ...]) -> str:
@@ -83,7 +85,7 @@ def main() -> None:
 
     device = torch.device(args.device)
     if args.output_dir is None:
-        out = _DEFAULT_OUT / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        out = plot_run_dir(Path(__file__))
     else:
         out = args.output_dir
     out = out.resolve()

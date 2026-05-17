@@ -40,7 +40,7 @@ export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
 NPAIRS="${FIG2_NPAIRS:-9}"
 SEED="${FIG2_SEED:-0}"
-OUT="${FIG2_OUT:-plots/fig2_sspc_spread.pdf}"
+OUT="${FIG2_OUT:-}"  # default: plots/00_fig2_spread/<timestamp>/fig2_sspc_spread.pdf
 SMOOTH="${FIG2_SMOOTH:-}"
 
 EXTRA=()
@@ -53,11 +53,16 @@ if [[ -n "${SMOOTH}" ]]; then
   SMOOTH_FLAG=(--smooth-sigma "${SMOOTH}")
 fi
 
-python -u scripts/fig2_spread.py \
+OUT_FLAG=()
+if [[ -n "${OUT}" ]]; then
+  OUT_FLAG=(--out "${OUT}")
+fi
+
+python -u scripts/analysis/00_fig2_spread.py \
   --z-target "${FIG2_ZTARGET:-0.1}" \
   --n-pairs "${NPAIRS}" \
   --seed "${SEED}" \
-  --out "${OUT}" \
+  "${OUT_FLAG[@]}" \
   --no-tex \
   "${SMOOTH_FLAG[@]}" \
   "${EXTRA[@]}"

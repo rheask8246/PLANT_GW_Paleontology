@@ -41,9 +41,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path as _Path
 
-_PROJECT_ROOT = _Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+_ANALYSIS_DIR = _Path(__file__).resolve().parent
+_PROJECT_ROOT = _ANALYSIS_DIR.parents[2]
+for _p in (_PROJECT_ROOT, _ANALYSIS_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from plant_paths import (  # noqa: E402
     CHECKPOINT_DIR,
@@ -53,6 +55,7 @@ from plant_paths import (  # noqa: E402
     ensure_paths,
     load_posterior_network_module,
     ml_data_dir,
+    plot_run_dir,
 )
 
 ensure_paths()
@@ -1007,7 +1010,12 @@ def main() -> None:
     p.add_argument("--cfm-checkpoint", type=Path, default=None, help="Default: checkpoints/cfm_final.pt")
     p.add_argument("--diffusion-checkpoint", type=Path, default=None, help="Default: checkpoints/diffusion_final.pt")
     p.add_argument("--device", type=str, default="auto", help="auto | cuda | cpu")
-    p.add_argument("--out-dir", type=Path, default=None, help="Output directory (default: ./plots/gwtc4_compare/)")
+    p.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Output directory (default: plots/04_gwtc4_validation/<timestamp>/)",
+    )
 
     p.add_argument("--nbins", type=int, default=60, help="Histogram bins per axis in ln m (Figure 1)")
     p.add_argument("--mmax", type=float, default=180.0, help="Max mass for Figure-1 axis in Msun")
@@ -1089,8 +1097,7 @@ def main() -> None:
     cfm_ckpt = args.cfm_checkpoint.resolve() if args.cfm_checkpoint else (ckpt_dir / "cfm_final.pt")
     dif_ckpt = args.diffusion_checkpoint.resolve() if args.diffusion_checkpoint else (ckpt_dir / "diffusion_final.pt")
 
-    out_dir = args.out_dir.resolve() if args.out_dir else (PROJECT_ROOT / "plots" / "gwtc4_compare")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = args.out_dir.resolve() if args.out_dir else plot_run_dir(Path(__file__))
 
     import pandas as pd
 

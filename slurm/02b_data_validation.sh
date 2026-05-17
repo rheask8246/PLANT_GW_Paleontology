@@ -11,7 +11,7 @@
 #SBATCH --account=sdp153
 #SBATCH --export=ALL
 
-# Full-parquet intrinsic validation (CPU). Timestamped under test/reports/validation/ and test/plots/validation/ by default.
+# Full-parquet intrinsic validation (CPU). Reports: test/reports/validation/<timestamp>/; plots: plots/02_validation/<timestamp>/.
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
@@ -26,4 +26,4 @@ CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
 source "${CONDA_ROOT}/etc/profile.d/conda.sh"
 conda activate plant
 
-python test/validation/run_data_validation.py
+python scripts/analysis/02_validation.py

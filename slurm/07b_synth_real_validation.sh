@@ -17,9 +17,9 @@
 # - Do not mix `module load cpu` with `module load gpu`.
 # - gpu-shared: 1 GPU; request enough CPUs/mem for dataloader + PyTorch host work.
 
-# Compare posterior marginals: **emulator synthetic catalog** vs real GW catalog (`07b_synthetic_real_validation.py`).
+# Compare posterior marginals: emulator synthetic vs real GW (`scripts/analysis/05_synth_real_compare.py`).
 #
-# Required: REAL_EVENTS_CSV (e.g. data/gwtc40_o4a_confident_default_pe.csv from fetch_gwtc40_gwosc_csv.py).
+# Required: REAL_EVENTS_CSV (e.g. from `python scripts/analysis/utils/fetch_gwtc40_events.py -o data/gwtc40_o4a_confident_default_pe.csv`).
 #
 # Usage:
 #   export REAL_EVENTS_CSV=data/gwtc40_o4a_confident_default_pe.csv
@@ -86,7 +86,7 @@ if [[ -n "${EXTRA_07B:-}" ]]; then
   read -r -a EXTRA <<< "${EXTRA_07B}"
 fi
 
-python -u scripts/07b_synthetic_real_validation.py \
+python -u scripts/analysis/05_synth_real_compare.py \
   "${SYNTH_ARGS[@]}" \
   --real-events-csv "${REAL}" \
   --checkpoint-dir checkpoints \

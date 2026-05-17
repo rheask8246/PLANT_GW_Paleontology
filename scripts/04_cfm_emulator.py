@@ -22,6 +22,7 @@ from plant_paths import (  # noqa: E402
     SPLITS_JSON,
     ensure_paths,
     ml_data_dir,
+    plot_run_dir,
 )
 
 ensure_paths()
@@ -484,8 +485,7 @@ def run_extended_smoke_test_validation(
     from models.cfm_emulator import normalize_obs, denormalize_obs, generate_catalog
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    plots_dir = work_dir / "plots" / "cfm_smoke_test" / timestamp
-    plots_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir = plot_run_dir(Path(__file__), timestamp=timestamp)
 
     obs_cols = ["mchirp", "q", "z"]
     metrics: Dict[str, object] = {}

@@ -123,7 +123,7 @@ mkdir -p logs
 
 ### Running the pipeline with SLURM (`sbatch`)
 
-1. **`cd`** into **`PLANT_GW_Paleontology/`** (the directory that contains `slurm/` and the numbered `*.py` scripts).
+1. **`cd`** into **`PLANT_GW_Paleontology/`** (the directory that contains `slurm/`, `scripts/`, and `data/`).
 2. Confirm **`conda activate plant`** works interactively and `python -c "import torch; print(torch.__version__)"` succeeds.
 3. Submit jobs from § **Full pipeline execution** below (e.g. `sbatch slurm/00_data_gen.sh`). Logs appear under **`logs/`**.
 4. Each `slurm/*.sh` exports **`SLURM_CONF=/etc/slurm/slurm.conf`** when that file is readable, so **`sbatch`** avoids DNS “configless” lookup failures on some login nodes.
@@ -162,6 +162,9 @@ These use the **same** full checkpoints produced above (e.g. `checkpoints/cfm_fi
 ```bash
 # Intrinsic data QA on full parquets (after 02)
 sbatch slurm/02b_data_validation.sh
+
+# (sfr_a, mu0) merger-rate / count heatmaps per channel (after 02)
+sbatch slurm/00_grid_rate_heatmaps.sh
 
 # Figure 5–style distribution panels + merger-rate vs z (optional TNG paths in script / CLI)
 sbatch slurm/06a_distribution_analysis.sh
@@ -238,23 +241,24 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # Tiny smoke-test run (CPU, ~5 min)
-python 00_sspc_data_generation.py --n-sfra 4 --n-mu0 4 --n-events 5000
-python 02_build_dataset.py --hdf5 data/sspc/models_sspc.hdf5 --data-source sspc
-python 03_rate_network.py --epochs 200
+python scripts/00_sspc_data_generation.py --n-sfra 4 --n-mu0 4 --n-events 5000
+python scripts/02_build_dataset.py --hdf5 data/sspc/models_sspc.hdf5 --data-source sspc
+python scripts/03_rate_network.py --epochs 200
 # Generative emulator (required before Step 5) — at minimum run CFM smoke (writes checkpoints/cfm_final.pt)
-python 04_cfm_emulator.py --smoke-test --steps 500
+python scripts/04_cfm_emulator.py --smoke-test --steps 500
 # optional second emulator for comparison, not both required for Step 5 in one go:
-# python 04b_diffusion_emulator.py --smoke-test --steps 500
+# python scripts/04b_diffusion_emulator.py --smoke-test --steps 500
 
 # Posterior: trains on **synthetic catalogs** from the frozen CFM (or diffusion, see --emulator)
-python 05_posterior_network.py --emulator cfm --model lite --epochs 10 --device cpu --batch-size 4 --n-max-events 32
+python scripts/05_posterior_network.py --emulator cfm --model lite --epochs 10 --device cpu --batch-size 4 --n-max-events 32
 
 # Smoke test for posterior modules only
 python test/test_posterior_network.py
 
-# Post-training figures and checks (SSPC HDF5 + optional GWTC-style CSV; CPU)
-python 06_population_figures.py --sspc-hdf5 data/sspc/models_sspc.hdf5
-python 07_gwtc_posterior_validate.py --events-csv data/gwtc_sample_events.csv --emulator cfm
+# Analysis / validation (see scripts/analysis/README.md)
+python scripts/analysis/02_validation.py
+python scripts/analysis/00_population_figures.py --sspc-hdf5 data/sspc/models_sspc.hdf5
+python scripts/analysis/05_gwtc_validate.py --events-csv data/gwtc_sample_events.csv --emulator cfm
 python test/test_ensemble_posterior.py
 ```
 
@@ -263,18 +267,19 @@ python test/test_ensemble_posterior.py
 | Step or tool | Local / debug | Production (SLURM) |
 |----------------|---------------|---------------------|
 | 00 | `--n-sfra 4 --n-mu0 4 --n-events 5000` (README quick-start) | `slurm/00_data_gen.sh` |
-| 02 | `python 02_build_dataset.py --hdf5 data/sspc/models_sspc.hdf5 --data-source sspc` | `slurm/02_build_dataset.sh` |
-| 02b validation | `python test/validation/run_data_validation.py` | `slurm/02b_data_validation.sh` |
-| 03 | `python 03_rate_network.py --epochs 200` | `slurm/03_rate_network.sh` |
-| 04 | `python 04_cfm_emulator.py --smoke-test --steps 500 --device cpu` | `slurm/04_cfm.sh` |
-| 04b | `python 04b_diffusion_emulator.py --smoke-test --steps 500` | `slurm/04b_diffusion.sh` |
+| 02 | `python scripts/02_build_dataset.py --hdf5 data/sspc/models_sspc.hdf5 --data-source sspc` | `slurm/02_build_dataset.sh` |
+| 02 validation | `python scripts/analysis/02_validation.py` | `slurm/02b_data_validation.sh` |
+| 03 | `python scripts/03_rate_network.py --epochs 200` | `slurm/03_rate_network.sh` |
+| 04 | `python scripts/04_cfm_emulator.py --smoke-test --steps 500 --device cpu` | `slurm/04_cfm.sh` |
+| 04b | `python scripts/04b_diffusion_emulator.py --smoke-test --steps 500` | `slurm/04b_diffusion.sh` |
 | 04 ensemble | `bash scripts/train_cfm_ensemble.sh 3` (tune `EXTRA_ARGS`) | `slurm/04_cfm_ensemble.sh` |
-| 05 | `python 05_posterior_network.py --model lite --epochs 10 --device cpu` | `slurm/05_posterior_network.sh` |
+| 05 | `python scripts/05_posterior_network.py --model lite --epochs 10 --device cpu` | `slurm/05_posterior_network.sh` |
 | 05 ensemble | `bash scripts/train_posterior_ensemble.sh` | `slurm/05_posterior_ensemble.sh` |
-| 06a distribution | `python data_distribution_analysis.py` | `slurm/06a_distribution_analysis.sh` |
-| 06 population | `python 06_population_figures.py` | `slurm/06_population_figures.sh` |
-| 07 GWTC | `python 07_gwtc_posterior_validate.py --events-csv data/gwtc_sample_events.csv` | `slurm/07_gwtc_validate.sh` (set `EVENTS_CSV`) |
-| Ensemble infer | `python ensemble_posterior_infer.py --synthetic-bag --member-dirs …` | Usually local; SLURM only if huge inputs |
+| 00 distribution | `python scripts/analysis/00_distribution_compare.py` | `slurm/06a_distribution_analysis.sh` |
+| 00 grid heatmaps | `python scripts/analysis/00_grid_rate_heatmaps.py` | `slurm/00_grid_rate_heatmaps.sh` |
+| 00 population | `python scripts/analysis/00_population_figures.py` | `slurm/06_population_figures.sh` |
+| 05 GWTC | `python scripts/analysis/05_gwtc_validate.py --events-csv data/gwtc_sample_events.csv` | `slurm/07_gwtc_validate.sh` |
+| 05 ensemble infer | `python scripts/analysis/05_ensemble_infer.py --synthetic-bag --member-dirs …` | Usually local |
 
 ---
 
@@ -319,7 +324,7 @@ flowchart TB
 6. **06 (optional, post-train)** — **Forward** **intrinsic** figures from the SSPC HDF5 (rate–weight vs *z*, masses in *z* slices) for paper-ready definitions.  
 7. **07 (optional)** — **Validate** the posterior on a **GWTC-style CSV** (masses, spin, *z*); not full PE, not a skymap.
 
-(An optional **epistemic ensemble** trains **K** of **04+05** with distinct seeds and combines inference with `ensemble_posterior_infer.py` — it is not a new pipeline integer, just a **mode**.)
+(An optional **epistemic ensemble** trains **K** of **04+05** with distinct seeds and combines inference with `scripts/analysis/05_ensemble_infer.py` — it is not a new pipeline integer, just a **mode**.)
 
 ---
 
@@ -403,7 +408,7 @@ Full run: 50 × 50 × 3 = 7,500 grid points × 50,000 events ≈ 375M events tot
 
 **Training:** Adam `lr=1e-3` (default in `train()`), weight decay `1e-4`, Huber loss on z-scored targets, ReduceLROnPlateau, early stopping (`--patience`, default 300), up to `--epochs` (default 3000). Also fits a GP baseline for comparison.
 
-**Outputs:** `checkpoints/rate_network_best.pt`, `checkpoints/rate_network_config.json`, `checkpoints/gp_rate_baseline.pkl`, plots under `plots/rate_network/<timestamp>/`.
+**Outputs:** `checkpoints/rate_network_best.pt`, `checkpoints/rate_network_config.json`, `checkpoints/gp_rate_baseline.pkl`, plots under `plots/03_rate_network/<timestamp>/`.
 
 **CLI example:**
 
@@ -430,7 +435,7 @@ python 03_rate_network.py --epochs 2000 --patience 200 --checkpoint-dir checkpoi
 
 **Z-jitter:** ±0.05 uniform noise added to discrete `z` values during training to smooth the distribution.
 
-**Output:** `checkpoints/cfm_final.pt`, plots in `plots/cfm_smoke_test/<timestamp>/`.
+**Output:** `checkpoints/cfm_final.pt`, plots in `plots/04_cfm_emulator/<timestamp>/`.
 
 ---
 
@@ -444,7 +449,7 @@ python 03_rate_network.py --epochs 2000 --patience 200 --checkpoint-dir checkpoi
 
 **Training:** Same hyperparameters as CFM (100k steps, batch=256, hidden_dim=256 for full run). Uses a cosine noise schedule with `N_TIMESTEPS=50` diffusion steps.
 
-**Output:** `checkpoints/diffusion_final.pt`, plots in `plots/diffusion_smoke_test/<timestamp>/`.
+**Output:** `checkpoints/diffusion_final.pt`, plots in `plots/04b_diffusion_emulator/<timestamp>/`.
 
 ---
 
@@ -505,7 +510,7 @@ python 03_rate_network.py --epochs 2000 --patience 200 --checkpoint-dir checkpoi
 
 - `checkpoints/posterior_network_best.pt` — `state_dict` at best validation NLL.  
 - `checkpoints/posterior_network_config.json` — `sspc_theta_param_cols`, `input_event_dim` (= 8), `norm_meta` (`theta_mean`, `theta_std`, and the `obs_normalizer` snapshot).  
-- `plots/posterior_network/<timestamp>/learning_curves.png` — train/val NLL.
+- `plots/05_posterior_network/<timestamp>/learning_curves.png` — train/val NLL.
 
 #### Command-line (run from `PLANT_GW_Paleontology/`)
 
@@ -553,159 +558,41 @@ python 05_posterior_network.py \
 
 ---
 
-### Step 06 — Population / astrophysics figures (`06_population_figures.py`)
+## Analysis scripts (`scripts/analysis/`)
 
-**In plain English:** After training, you may want **forward** (population) figures: how merger **rate** and **masses** look as a function of redshift in the **SSPC** library. Step 5 alone outputs Λ, not a full *dR/dz* sheet; this script **reads the intrinsic HDF5** (same as Step 00) and plots **aggregated** rate-weight vs *z* and **mass ratio** panels in *z* slices. This is a **clarity** step for papers: it keeps definitions of “rate at a z-bin” in one place.
+**In plain English:** Training stops at Step **05**. Everything under `scripts/analysis/` is for **your** checks: data QA, population figures, paper-style comparisons, and posterior sanity tests. Scripts are named by **which pipeline step they inspect** (`00_…`, `02_…`, `04_…`, `05_…`). Shared plotting code lives in `scripts/analysis/lib/`.
 
-**What it does (technical):** Reuses `load_sspc_rate_vs_redshift` and `m1_from_mchirp_q` from `data_distribution_analysis.py` to (1) plot summed SSPC `weight` vs *z* (0–10) as a **shape** proxy, with markers at reference *z* values, and (2) weighted histograms of *m*₁, *m*₂, and *q* for events within the *z* tolerance around each slice, for each **channel** (SMT, CE; optional CHE). Defaults write under `plots/population_results/<timestamp>/`.
+Full index: [`scripts/analysis/README.md`](scripts/analysis/README.md).
 
-**What the plots show**
+| Script | Step | What it does |
+|--------|------|----------------|
+| `00_population_figures.py` | 00 | Rate vs *z*, *m*₁/*m*₂/*q* → `plots/00_population_figures/<timestamp>/` |
+| `00_distribution_compare.py` | 00 | TNG vs SSPC Figure 5 + merger-rate vs *z* → `plots/00_distribution_compare/<timestamp>/` |
+| `00_fig2_spread.py` | 00 | Figure-2-style SSPC mass marginals → `plots/00_fig2_spread/<timestamp>/` |
+| `00_grid_rate_heatmaps.py` | 00 | (sfr_a, mu0) heatmaps → `plots/00_grid_rate_heatmaps/<timestamp>/` |
+| `02_validation.py` | 02 | Intrinsic QA → reports `test/reports/validation/<timestamp>/`, plots `plots/02_validation/<timestamp>/` |
+| `04_emulator_m1_compare.py` | 04/04b | CFM vs diffusion *m*₁ → `plots/04_emulator_m1_compare/<timestamp>/` |
+| `04_gwtc4_validation.py` | 04 | GWTC-4 paper figures → `plots/04_gwtc4_validation/<timestamp>/` |
+| `05_gwtc_validate.py` | 05 | Event CSV → posterior marginals → `plots/05_gwtc_validate/<timestamp>/` |
+| `05_synth_real_compare.py` | 05 | Emulator synthetic catalog vs real GW CSV (overlay marginals) |
+| `05_ensemble_infer.py` | 05 | *K* posteriors: log-mean density and/or mixture samples |
+| `utils/fetch_gwtc40_events.py` | — | GWOSC API → CSV for `05_synth_real_compare.py` |
 
-- **`rate_vs_redshift_sspc.png`** — **Sum of merger-rate weights** in each *z* bin (aggregated from the HDF5), on a log *y* scale; a **shape** proxy, not a calibrated Gpc⁻³ yr⁻¹ unless you renormalize against cosmology. Vertical markers: requested *z* slices.
-- **`rate_at_z_markers.txt`** — Numeric `sum_weight` at the *z* bin nearest each marker.
-- **`channel_{SMT|CE|CHE}_zslice_*.png`** — Weighted *m*₁, *m*₂, *q* for events near the requested *z*.
-
-**Command-line (local, CPU):**
-
-```bash
-python 06_population_figures.py --sspc-hdf5 data/sspc/models_sspc.hdf5 --z-slices 0.2 1.0
-```
-
-**Cluster:** `slurm/06_population_figures.sh` — same script, longer wall time if the HDF5 is very large (mostly I/O bound).
-
----
-
-### Step 07 — GWTC-style Λ validation (`07_gwtc_posterior_validate.py`)
-
-**In plain English:** This script takes a **small table of real (or export) event point estimates** — primary and secondary mass, effective spin, redshift — and asks the **trained** Step 5 model for **samples of the nine** `sspc_*_mean` parameters. It is **not** a skymap or a full LIGO PE; it is a **sanity check** that the inverse network behaves sensibly on numbers in the right ballpark. **Channel** (SMT/CE/CHE) is **not** an input: see `gwtc_channel_stopgap.md` in the output folder for the v1 scope.
-
-**What it does (technical):** Maps masses → chirp mass and *q*; `build_events_8d` with the **emulator** `obs_normalizer`; `PosteriorNet.sample`. Writes marginals, `theta_summary.csv`, and `run_meta.json` under `plots/gwtc_validation/<timestamp>/` by default.
-
-**What the plots show**
-
-- **`marginal_thetas.png`** — 1-D histograms of each **SSPC mean** under the model (uncertainty in **inferred** settings, not in detector masses unless you add PE).
-
-**Input CSV** (case-insensitive columns): `m1` or `mass_1`, `m2` or `mass_2`, `chi_eff` or `chieff`, `z` or `redshift`. A **mock** three-event file ships as `data/gwtc_sample_events.csv` for wiring tests.
+**Examples:**
 
 ```bash
-python 07_gwtc_posterior_validate.py --events-csv data/gwtc_sample_events.csv \
-  --checkpoint-dir checkpoints --emulator cfm
+python scripts/analysis/02_validation.py
+python scripts/analysis/00_grid_rate_heatmaps.py --metric rate
+python scripts/analysis/00_distribution_compare.py --sspc-hdf5 data/sspc/models_sspc.hdf5
+python scripts/analysis/00_population_figures.py --z-slices 0.2 1.0
+python scripts/analysis/04_emulator_m1_compare.py --device cuda
+python scripts/analysis/05_gwtc_validate.py --events-csv data/gwtc_sample_events.csv --emulator cfm
+python scripts/analysis/05_ensemble_infer.py --synthetic-bag --member-dirs checkpoints/posterior_ensemble/1 checkpoints/posterior_ensemble/2
 ```
 
-**Cluster:** `slurm/07_gwtc_validate.sh` — set `EVENTS_CSV` to your GWOSC export if not using the sample file.
+`test/validation/run_data_validation.py` is a thin wrapper that calls `02_validation.py`.
 
----
-
-### Optional — Epistemic ensemble (04 + 05 + `ensemble_posterior_infer.py`)
-
-**In plain English:** You can train **K** independent emulators (different `--seed` and `--output-checkpoint`) and **K** matching posteriors, each with its own `--emulator-checkpoint` and `--output-checkpoint-pt`. **Epistemic** spread is the disagreement across these **training** runs; **aleatoric** spread is the flow’s *stochastic* samples for a **fixed** member. The helpers **do not** ensemble Step 00 or 03 unless you add that separately.
-
-**What it does (technical):** `models/ensemble_posterior.py` implements (1) **log-mean of log-densities** (1/*K* ∑ log *p*ₖ) — the log of a **geometric mean** of member densities, useful for **point** reporting with the usual caveats about flows and normalization, and (2) **mixture sampling**: draw equally from each member and **concatenate** (labels which member a sample came from are not kept unless you extend the code). `ensemble_posterior_infer.py` can run in **`--synthetic-bag`** mode without a CSV for a quick check.
-
-**Command-line (local, CPU, synthetic bag, needs trained checkpoints in `member-dirs`):**
-
-```bash
-python ensemble_posterior_infer.py --synthetic-bag --member-dirs checkpoints/posterior_ensemble/1 checkpoints/posterior_ensemble/2 --mode both
-```
-
-**Unit test:** `python test/test_ensemble_posterior.py` — K identical members recover the same log-density as a single model.
-
-**Shell helpers:** `scripts/train_cfm_ensemble.sh`, `scripts/train_posterior_ensemble.sh` — see comments inside for `DEVICE` and `EXTRA_ARGS`.
-
-**Cluster:** `slurm/04_cfm_ensemble.sh` and `slurm/05_posterior_ensemble.sh` (array jobs); adjust `#SBATCH --array=1-K`.
-
----
-
-### Analysis — BBH Mass Distribution (`data_distribution_analysis.py`)
-
-**In plain English:** A **“BBH”** (binary black hole) **mass distribution** is “how many mergers you get at each primary black-hole mass” (a histogram in physics language). This script is not part of the **training** path; it is a **figure** to **eyeball** whether the *shapes* of masses from this pipeline in the *right-hand* panels are in the **ballpark** of a modern cosmological simulation (TNG) on the *left*—*not* a statistical proof, but a **sanity check** that the synthetic pipeline is not wildly off. Redshift = “how far back in cosmic time / how far in distance” the merger effectively lived.
-
-**What it does (technical):** Reproduces Figure 5 of Briel et al. (Fit_SFRD_TNG paper) and overplots SSPC-generated data for direct comparison. Shows the redshift evolution of the BBH primary-mass distribution dR/dm₁ across three formation channels at merger redshifts z = 0.1 – 0.5.
-
-**Input:**
-- `data/sspc/models_sspc.hdf5` — SSPC event catalogs (right column)
-- `../Fit_SFRD_TNG/data/Rate_info.h5` — TNG100-1 intrinsic merger rate (left column; optional)
-- `../Fit_SFRD_TNG/data/COMPAS_Output_wWeights.h5` — COMPAS DCO table (optional)
-- `../Fit_SFRD_TNG/data/BBHMassSpinRedshift_BSplineIID.h5` — GWTC-4 B-Spline overlay (optional, requires `popsummary`)
-
-**Output (default):** `plots/distribution_analysis/<timestamp>/data_distribution_analysis.png` and `merger_rate_density_redshift.png` (or override with `--output` / `--fig4-output` / `--output-dir`; use `--no-timestamped-dir` for a flat layout).
-
-**Figure layout:**
-
-| Row | Channel |
-|-----|---------|
-| 0 | All channels (stable + CE, CHE excluded — matching original Fig. 5) |
-| 1 | Stable mass-transfer (SMT) only |
-| 2 | Common-envelope (CE) only |
-
-- **Left column**: TNG100-1 intrinsic rate [Gpc⁻³ yr⁻¹ M☉⁻¹] — reproduced from the reference figure
-- **Right column**: SSPC intrinsic merger-rate dN/dm₁ aggregated across all grid points, area-normalised per z-slice for shape comparison
-- **Merger rate vs redshift (Fig 4/6)**: the companion `merger_rate_density_redshift.png` in the same run folder (when generated) — intrinsic merger-rate **density** as a function of *z* for the SSPC run
-- Gray band: GWTC-4 B-Spline posterior (from `popsummary`)
-- Colors: `rocket_r` colormap, darkest = z=0.1, lightest = z=0.5
-
-**Note on z range:** The SSPC data now spans z = 0.1 – 10 (intrinsic rate, no detection cut). TNG data in `Rate_info.h5` covers z ≤ 0.45. The original paper uses z up to 8, which requires a full TNG simulation run.
-
-**Usage:**
-```bash
-python data_distribution_analysis.py
-
-# With custom paths
-python data_distribution_analysis.py \
-  --tng-data-dir /path/to/Fit_SFRD_TNG/data \
-  --sspc-hdf5 data/sspc/models_sspc.hdf5 \
-  --output plots/my_comparison.png
-```
-
----
-
-### Intrinsic data validation (`test/validation/run_data_validation.py`)
-
-**In plain English:** Before trusting months of training, the team runs a **checklist** on the *intrinsic* table from Step 02: are there *holes* in the grid, crazy numbers, or train/test *leaks*? Think of a **data-quality inspector** for scientific tables—flags weird coverage, bad splits, or distribution shifts.
-
-**What it does (technical):** After `02_build_dataset.py`, this script checks that the **intrinsic** training data (full event range, not detection-weighted) is consistent and usable. It reads `all_events.parquet` by default and does **not** filter on detectability or use `all_detected_events.parquet` for these checks.
-
-**Checks (summary):**
-
-| Check | Purpose |
-|-------|---------|
-| **Grid coverage** | `lambda_*` ranges, CE occupancy in `(chi_b, alpha_CE)` space, optional coverage plots |
-| **Channel health** | Per-channel grid counts and intrinsic `sum_weight` / `log_efficiency` from `hyperparam_table.csv` |
-| **Event validity** | NaNs, physical bounds on `mchirp`, `q`, `chieff`, `z`; `weight` is optional (if absent, weight checks are skipped) |
-| **Split hygiene** | No overlapping `grid_idx` across train/val/test; nearest train–test distance in λ-space |
-| **Rare regions** | Flags low-intrinsic-rate grid points (default: bottom 5% of `sum_weight`) |
-| **Distribution sanity** | Train vs test KL / KS / MMD on observables; redshift shape by `channel_id` |
-
-**Outputs (default):** each run creates a **timestamped** subfolder, e.g. `test/reports/validation/<timestamp>/` and `test/plots/validation/<timestamp>/`, containing:
-
-- `validation_summary.json` — machine-readable pass/warn/fail per check  
-- `validation_summary.md` — short table  
-- `*.csv` — e.g. channel summary, rare-event flags, violations sample  
-- `*.png` — heatmaps, histograms, CDFs  
-
-Use `--no-timestamp-subdir` for the legacy flat layout under `test/reports/validation/`.
-
-**When to run:** After Step 02 (same directory as `hyperparam_table.csv`, `hyperparam_table_encoded.csv`, `splits.json`, `all_events.parquet`).
-
-**How to run:**
-
-```bash
-cd PLANT_GW_Paleontology
-source ../venv/bin/activate   # or your venv
-
-python test/validation/run_data_validation.py
-```
-
-**Options:**
-
-| Flag | Meaning |
-|------|---------|
-| `--project-root PATH` | Root directory (default: parent of `test/validation/`) |
-| `--events-parquet PATH` | Override path to intrinsic events (default: `all_events.parquet` under project root) |
-| `--rare-quantile FLOAT` | Quantile for “rare” intrinsic grids (default: `0.05`) |
-| `--strict` | Exit with code 1 if any check is **warn** or **fail** (for CI / batch jobs) |
-| `--no-timestamp-subdir` | Write reports directly under `test/reports/validation/` (no per-run subfolder) |
-| `--run-id NAME` | Use `NAME` as the subfolder instead of an automatic timestamp |
+**Epistemic ensemble training** (not analysis): `scripts/train_cfm_ensemble.sh`, `scripts/train_posterior_ensemble.sh` + `slurm/04_cfm_ensemble.sh`, `slurm/05_posterior_ensemble.sh`.
 
 ---
 
@@ -715,32 +602,44 @@ python test/validation/run_data_validation.py
 
 ```
 PLANT_GW_Paleontology/
-├── 00_sspc_data_generation.py   # Step 00: SSPC cosmic integration
-├── 02_build_dataset.py          # Step 02: HDF5 → parquet + normalizer
-├── 03_rate_network.py           # Step 03: rate MLP
-├── 04_cfm_emulator.py           # Step 04: CFM emulator
-├── 04b_diffusion_emulator.py    # Step 04b: Diffusion emulator
-├── 05_posterior_network.py    # Step 05: amortized p(Λ|catalog) (set encoder + flow)
-├── 06_population_figures.py   # Post-train: SSPC dR/dz-style + mass panels
-├── 07_gwtc_posterior_validate.py  # Post-train: CSV → posterior marginals
-├── ensemble_posterior_infer.py  # K posteriors: log-mean + mixture samples
+├── plant_paths.py               # PROJECT_ROOT, data/ ML paths, checkpoints/
+├── scripts/
+│   ├── 00_sspc_data_generation.py
+│   ├── 02_build_dataset.py
+│   ├── 03_rate_network.py
+│   ├── 04_cfm_emulator.py
+│   ├── 04b_diffusion_emulator.py
+│   ├── 05_posterior_network.py
+│   ├── train_cfm_ensemble.sh
+│   ├── train_posterior_ensemble.sh
+│   └── analysis/                # Diagnostics & figures (see analysis/README.md)
+│       ├── 00_population_figures.py
+│       ├── 00_distribution_compare.py
+│       ├── 00_fig2_spread.py
+│       ├── 00_grid_rate_heatmaps.py
+│       ├── 02_validation.py
+│       ├── 04_emulator_m1_compare.py
+│       ├── 04_gwtc4_validation.py
+│       ├── 05_gwtc_validate.py
+│       ├── 05_synth_real_compare.py
+│       ├── 05_ensemble_infer.py
+│       ├── lib/distribution.py  # shared TNG/SSPC / emulator plot helpers
+│       └── utils/
+│           ├── fetch_gwtc40_events.py
+│           └── selection_effects.py
 ├── models/
 │   ├── rate_network.py
 │   ├── cfm_emulator.py
 │   ├── diffusion_emulator.py
-│   ├── ensemble_posterior.py    # log-mean log p, mixture_sample
-│   ├── posterior_network_lite.py   # LitePosteriorNet, PosteriorNet, SSPC Λ list
-│   └── posterior_network_full.py  # FullPosteriorNet
-├── data_distribution_analysis.py  # Figure 5 comparison (TNG vs SSPC mass dist.)
-├── scripts/                     # train_cfm_ensemble.sh, train_posterior_ensemble.sh
-├── selection_effects.py         # pdet computation (SNR grid; used by 02 / analysis)
+│   ├── ensemble_posterior.py
+│   ├── posterior_network_lite.py
+│   └── posterior_network_full.py
+├── data/                        # Step-02 tables + SSPC HDF5 (see plant_paths.py)
 ├── test/
-│   ├── test_posterior_network.py  # Unit tests for posterior Nets (synthetic, CPU)
+│   ├── test_posterior_network.py
 │   ├── test_ensemble_posterior.py
-│   ├── validation/
-│   │   └── run_data_validation.py   # Intrinsic data validation (after Step 02)
-│   ├── reports/validation/          # validation_summary.json, .md, CSVs (timestamped subdirs)
-│   └── plots/validation/            # validation plots (timestamped subdirs)
+│   ├── validation/run_data_validation.py  # → scripts/analysis/02_validation.py
+│   └── reports/validation/
 ├── requirements.txt
 ├── requirements-optional.txt  # e.g. sbi (not used by core pipeline scripts)
 ├── slurm/
@@ -769,14 +668,15 @@ PLANT_GW_Paleontology/
 │   ├── cfm_*.pt / diffusion_*.pt # naming depends on 04/04b training mode
 │   ├── posterior_network_best.pt
 │   └── posterior_network_config.json
-└── plots/
-    ├── rate_network/
-    ├── cfm_*, diffusion_*/
-    ├── posterior_network/
-    ├── distribution_analysis/     # per-run timestamped (data_distribution_analysis)
-    ├── population_results/         # 06
-    ├── gwtc_validation/           # 07
-    └── ensemble_posterior/        # ensemble_posterior_infer.py
+└── plots/                         # plots/<script_stem>/<timestamp>/ per run
+    ├── 03_rate_network/
+    ├── 04_cfm_emulator/
+    ├── 04b_diffusion_emulator/
+    ├── 05_posterior_network/
+    ├── 00_distribution_compare/
+    ├── 00_population_figures/
+    ├── 02_validation/
+    └── …                          # one folder per plotting script
 ```
 
 ---

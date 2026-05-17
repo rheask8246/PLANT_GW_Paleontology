@@ -11,7 +11,7 @@
 #SBATCH --account=sdp153
 #SBATCH --export=ALL
 
-# BBH mass-distribution / Figure 5 style panels. Writes to plots/distribution_analysis/<timestamp>/ by default.
+# BBH mass-distribution / Figure 5 style panels. Writes to plots/00_distribution_compare/<timestamp>/ by default.
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
@@ -26,4 +26,4 @@ CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
 source "${CONDA_ROOT}/etc/profile.d/conda.sh"
 conda activate plant
 
-python scripts/data_distribution_analysis.py --sspc-hdf5 data/sspc/models_sspc.hdf5
+python scripts/analysis/00_distribution_compare.py --sspc-hdf5 data/sspc/models_sspc.hdf5

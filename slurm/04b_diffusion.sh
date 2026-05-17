@@ -15,7 +15,7 @@
 # Usage: sbatch slurm/04b_diffusion.sh
 # Full Diffusion training: 100k steps, hidden_dim=256, batch=256 on 1x V100 GPU.
 # ~12–20 h wall-time depending on grid size.
-# Output: checkpoints/diffusion_final.pt + plots/diffusion_smoke_test/<date>/
+# Output: checkpoints/diffusion_final.pt + plots/04b_diffusion_emulator/<timestamp>/
 
 set -euo pipefail
 

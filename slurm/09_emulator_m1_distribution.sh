@@ -15,7 +15,7 @@
 #SBATCH --no-requeue
 
 # Fast GPU job: CFM vs diffusion primary-mass KDE at fixed SSPC Λ (three channel rows: all, SMT, CE)
-# (`data_distribution_analysis.py --emulator-m1-compare`).
+# (`scripts/analysis/04_emulator_m1_compare.py`).
 #
 # From PLANT_GW_Paleontology/:
 #   sbatch slurm/09_emulator_m1_distribution.sh
@@ -58,7 +58,7 @@ fi
 
 echo "=== emulator m₁ compare: n_events=${N_EVENTS} device=${DEVICE} (3 rows: all, SMT, CE) ==="
 
-python -u scripts/data_distribution_analysis.py \
+python -u scripts/analysis/04_emulator_m1_compare.py \
   --emulator-m1-compare \
   --device "${DEVICE}" \
   --n-events "${N_EVENTS}" \

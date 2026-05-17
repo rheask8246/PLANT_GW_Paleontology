@@ -25,7 +25,7 @@
 #
 # Override smoke defaults (optional):
 #   export GWTC4_NBOOT=3 GWTC4_NROWS=48 GWTC4_NEVENTS=128
-#   export GWTC4_OUT_DIR=plots/gwtc4_compare/my_smoke
+#   export GWTC4_OUT_DIR=plots/04_gwtc4_validation/my_smoke
 
 set -euo pipefail
 
@@ -39,7 +39,7 @@ export GWTC4_FIGS="${GWTC4_FIGS:-2}"
 export GWTC4_NBOOT="${GWTC4_NBOOT:-2}"
 export GWTC4_NROWS="${GWTC4_NROWS:-32}"
 export GWTC4_NEVENTS="${GWTC4_NEVENTS:-96}"
-export GWTC4_OUT_DIR="${GWTC4_OUT_DIR:-plots/gwtc4_compare/smoke_fig2_${SLURM_JOB_ID:-local}}"
+export GWTC4_OUT_DIR="${GWTC4_OUT_DIR:-plots/04_gwtc4_validation/smoke_fig2_${SLURM_JOB_ID:-local}}"
 export GWTC4_DEVICE="${GWTC4_DEVICE:-cuda}"
 
 if [[ -z "${GWTC4_DATA_RELEASE:-}" ]]; then

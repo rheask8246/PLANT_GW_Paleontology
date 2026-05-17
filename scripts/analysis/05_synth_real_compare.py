@@ -41,9 +41,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path as _Path
 
-_PROJECT_ROOT = _Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+_ANALYSIS_DIR = _Path(__file__).resolve().parent
+_PROJECT_ROOT = _ANALYSIS_DIR.parents[2]
+for _p in (_PROJECT_ROOT, _ANALYSIS_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from plant_paths import (  # noqa: E402
     CHECKPOINT_DIR,
@@ -51,6 +53,7 @@ from plant_paths import (  # noqa: E402
     PROJECT_ROOT,
     ensure_paths,
     load_posterior_network_module,
+    plot_run_dir,
 )
 
 ensure_paths()
@@ -73,8 +76,6 @@ from models.posterior_network_lite import SSPC_THETA_PARAM_COLS
 _05 = load_posterior_network_module()
 build_events_6d = _05.build_events_6d
 load_frozen_emulator = _05.load_frozen_emulator
-
-_DEFAULT_OUT = PROJECT_ROOT / "plots" / "synth_real_validation"
 
 # Default emulator row: SMT channel, SSPC grid corner closest to TNG100-1 best-fit
 # (sfr_a ≈ 0.017, μ₀ ≈ 0.025) on the 8×8 linspace grid — see 00_sspc_data_generation.py.
@@ -404,7 +405,7 @@ def main() -> None:
     out = (
         args.output_dir.resolve()
         if args.output_dir
-        else _DEFAULT_OUT / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        else plot_run_dir(Path(__file__))
     )
     out.mkdir(parents=True, exist_ok=True)
 

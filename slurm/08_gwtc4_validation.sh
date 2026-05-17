@@ -42,7 +42,7 @@
 # Optional overrides (examples):
 #   sbatch --export=ALL,GWTC4_USE_TEX=1 slurm/08_gwtc4_validation.sh   # requires full TeX (type1cm, etc.)
 #   sbatch --export=ALL,GWTC4_NBOOT=4,GWTC4_NROWS=128,GWTC4_NEVENTS=128 slurm/08_gwtc4_validation.sh
-#   sbatch --export=ALL,GWTC4_OUT_DIR=plots/gwtc4_validation/my_run slurm/08_gwtc4_validation.sh
+#   sbatch --export=ALL,GWTC4_OUT_DIR=plots/04_gwtc4_validation/my_run slurm/08_gwtc4_validation.sh
 # For longer paper-quality runs, edit #SBATCH --time above (gpu-shared allows up to 48h).
 
 set -euo pipefail
@@ -136,7 +136,7 @@ if [[ -n "${GWTC4_EXTRA:-}" ]]; then
 fi
 
 # -u = unbuffered stdout/stderr so logs update during long runs.
-python -u scripts/gwtc4_validation.py \
+python -u scripts/analysis/04_gwtc4_validation.py \
   --device "${DEVICE}" \
   ${NO_TEX_FLAG} \
   "${PAPER_FLAG[@]}" \

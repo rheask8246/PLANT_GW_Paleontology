@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-data_distribution_analysis.py
-──────────────────────────────
+Shared TNG vs SSPC distribution plotting (Figure 5 / Figure 4 style).
+
+Used by ``00_distribution_compare.py`` and ``04_emulator_m1_compare.py``.
 Reproduces Figure 5 of Briel et al. (Fit_SFRD_TNG paper) and overplots
 the SSPC-generated data so both can be directly compared.
 
@@ -19,39 +20,36 @@ Y-axis : dR/dm₁  (left) intrinsic rate density [Gpc⁻³ yr⁻¹ M☉⁻¹],
 Colors : rocket_r colormap, darkest = lowest z, lightest = highest z
 Gray   : GWTC-4 B-Spline mass distribution (BBHMassSpinRedshift_BSplineIID.h5)
 
-Usage:
-    python data_distribution_analysis.py [--tng-data-dir PATH] [--sspc-hdf5 PATH]
-                                          [--compas-hdf5 PATH] [--output PATH]
-
-    # CFM vs diffusion at fixed SSPC Λ (3 rows: all CE+SMT, SMT, CE; defaults: TNG100-1-style reference, see 00_sspc_data_generation.py):
-    python data_distribution_analysis.py --emulator-m1-compare --device cuda
-
-See also: ``slurm/09_emulator_m1_distribution.sh`` for a short GPU job on Expanse.
+Library module — run ``scripts/analysis/00_distribution_compare.py`` or
+``04_emulator_m1_compare.py`` from the project root.
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path as _Path
 
-_PROJECT_ROOT = _Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = _Path(__file__).resolve().parents[3]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from plant_paths import (  # noqa: E402
     CHECKPOINT_DIR,
     HYPERPARAM_TABLE_ENCODED_CSV,
+    PLOTS_ROOT,
     PROJECT_ROOT,
     REPO_ROOT,
     ensure_paths,
     find_data_dir,
     load_posterior_network_module,
+    plot_run_dir,
+    plot_script_stem,
+    resolve_plot_output,
 )
 
 ensure_paths()
 
 import argparse
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -83,9 +81,13 @@ _TNG_DATA_DEFAULT  = REPO_ROOT / "Fit_SFRD_TNG" / "data"
 _SSPC_HDF5_DEFAULT = PROJECT_ROOT / "data" / "sspc" / "models_sspc.hdf5"
 _COMPAS_DEFAULT    = _TNG_DATA_DEFAULT / "COMPAS_Output_wWeights.h5"
 _GWTC4_DEFAULT     = _TNG_DATA_DEFAULT / "BBHMassSpinRedshift_BSplineIID.h5"
-_DIST_PLOT_DIR_DEFAULT = PROJECT_ROOT / "plots" / "distribution_analysis"
-_FIG5_OUTPUT_DEFAULT = _DIST_PLOT_DIR_DEFAULT / "data_distribution_analysis.png"
-_FIG4_OUTPUT_DEFAULT = _DIST_PLOT_DIR_DEFAULT / "merger_rate_density_redshift.png"
+_ANALYSIS_DIR = Path(__file__).resolve().parent.parent
+_DIST_COMPARE_SCRIPT = _ANALYSIS_DIR / "00_distribution_compare.py"
+_EMULATOR_M1_SCRIPT = _ANALYSIS_DIR / "04_emulator_m1_compare.py"
+
+
+def _legacy_plot_dir(script_path: Path | str) -> Path:
+    return PLOTS_ROOT / plot_script_stem(script_path)
 
 # Redshift slices for SSPC column (intrinsic rate spans z=0.1–10)
 SSPC_Z_PLOT = [0.1, 0.5, 1.0, 2.0, 5.0]
@@ -987,7 +989,8 @@ def make_emulator_m1_compare_figure(
 # CLI
 # ---------------------------------------------------------------------------
 
-def main():
+def main(script_path: Path | str | None = None) -> None:
+    script_path = Path(script_path or _DIST_COMPARE_SCRIPT)
     parser = argparse.ArgumentParser(
         description="Compare TNG Figure 5/4 distributions with SSPC data."
     )
@@ -1002,12 +1005,12 @@ def main():
         type=Path,
         default=None,
         help="If set, write all figures into this directory. If unset, use "
-        "`plots/distribution_analysis/<timestamp>/` unless --no-timestamped-dir is given.",
+        "plots/<script_stem>/<timestamp>/ unless --no-timestamped-dir is given.",
     )
     parser.add_argument(
         "--no-timestamped-dir",
         action="store_true",
-        help="Use legacy default filenames under plots/distribution_analysis/ (no new subfolder).",
+        help="Write under plots/<script_stem>/ without a timestamp subfolder.",
     )
     parser.add_argument("--output", type=Path, default=None,
                         help="Output path for Figure 5 (overrides --output-dir).")
@@ -1016,93 +1019,7 @@ def main():
     parser.add_argument("--skip-fig4", "--skip-fig6", dest="skip_fig4", action="store_true",
                         help="Skip generating Figure 4 comparison plot")
 
-    # --- CFM vs diffusion at fixed SSPC Λ (no TNG / paper overlay) ---
-    parser.add_argument(
-        "--emulator-m1-compare",
-        action="store_true",
-        help="Only plot area-normalised m₁ KDE from CFM and diffusion at fixed SSPC parameters "
-        "(skips TNG/SSPC Figure 5 and Figure 4).",
-    )
-    parser.add_argument(
-        "--emulator-output",
-        type=Path,
-        default=None,
-        help="Output PNG for --emulator-m1-compare (default: timestamped under plots/distribution_analysis/).",
-    )
-    parser.add_argument(
-        "--hyperparam-encoded-csv",
-        type=Path,
-        default=HYPERPARAM_TABLE_ENCODED_CSV,
-        help="Table used for SSPC mean min/max normalisation (same as training).",
-    )
-    parser.add_argument(
-        "--cfm-checkpoint",
-        type=Path,
-        default=CHECKPOINT_DIR / "cfm_final.pt",
-        help="CFM checkpoint for --emulator-m1-compare.",
-    )
-    parser.add_argument(
-        "--diffusion-checkpoint",
-        type=Path,
-        default=CHECKPOINT_DIR / "diffusion_final.pt",
-        help="Diffusion emulator checkpoint for --emulator-m1-compare.",
-    )
-    parser.add_argument("--sfr-a", type=float, default=None, help="Override sfr_a (maps to lambda_5 norm).")
-    parser.add_argument("--mu0", type=float, default=None, help="Override mu0 (maps to lambda_6 norm).")
-    parser.add_argument(
-        "--sspc-params-json",
-        type=Path,
-        default=None,
-        help="Optional JSON with keys sspc_sfr_a_mean, …, sspc_alpha_skew_mean (partial overrides OK).",
-    )
-    parser.add_argument("--n-events", type=int, default=12000, help="Catalog size per emulator for m₁ KDE.")
-    parser.add_argument("--seed", type=int, default=42, help="RNG seed (torch) for emulator sampling.")
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        choices=["cuda", "cpu", "auto"],
-        help="Device for emulator forward pass.",
-    )
-
     args = parser.parse_args()
-
-    if args.emulator_m1_compare:
-        import torch
-
-        sspc_means = dict(_DEFAULT_EMULATOR_SSPC_MEANS)
-        if args.sspc_params_json is not None:
-            p = Path(args.sspc_params_json).resolve()
-            extra = json.loads(p.read_text(encoding="utf-8"))
-            for k, v in extra.items():
-                sspc_means[str(k)] = float(v)
-        sfr_a = float(args.sfr_a) if args.sfr_a is not None else float(sspc_means["sspc_sfr_a_mean"])
-        mu0 = float(args.mu0) if args.mu0 is not None else float(sspc_means["sspc_mu0_mean"])
-
-        dev = args.device
-        if dev == "auto":
-            dev = "cuda" if torch.cuda.is_available() else "cpu"
-
-        if args.emulator_output is not None:
-            out_png = Path(args.emulator_output).resolve()
-        else:
-            base = _DIST_PLOT_DIR_DEFAULT / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            base.mkdir(parents=True, exist_ok=True)
-            out_png = base / "emulator_m1_cfm_vs_diffusion.png"
-
-        make_emulator_m1_compare_figure(
-            output_path=out_png,
-            hyperparam_encoded_csv=Path(args.hyperparam_encoded_csv).resolve(),
-            cfm_checkpoint=Path(args.cfm_checkpoint).resolve(),
-            diffusion_checkpoint=Path(args.diffusion_checkpoint).resolve(),
-            sfr_a=sfr_a,
-            mu0=mu0,
-            sspc_means=sspc_means,
-            n_events=int(args.n_events),
-            seed=int(args.seed),
-            device=str(dev),
-        )
-        return
 
     if args.output_dir is not None:
         args.output_dir = args.output_dir.resolve()
@@ -1112,18 +1029,15 @@ def main():
         if args.fig4_output is None:
             args.fig4_output = args.output_dir / "merger_rate_density_redshift.png"
     elif args.output is None and args.fig4_output is None and not args.no_timestamped_dir:
-        base = _DIST_PLOT_DIR_DEFAULT / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        base.mkdir(parents=True, exist_ok=True)
+        base = plot_run_dir(script_path)
         args.output = base / "data_distribution_analysis.png"
         args.fig4_output = base / "merger_rate_density_redshift.png"
     else:
+        legacy = _legacy_plot_dir(script_path)
         if args.output is None:
-            args.output = _FIG5_OUTPUT_DEFAULT
+            args.output = legacy / "data_distribution_analysis.png"
         if args.fig4_output is None:
-            if args.output is not None and args.output != _FIG5_OUTPUT_DEFAULT:
-                args.fig4_output = args.output.parent / "merger_rate_density_redshift.png"
-            else:
-                args.fig4_output = _FIG4_OUTPUT_DEFAULT
+            args.fig4_output = args.output.parent / "merger_rate_density_redshift.png"
 
     print("=== BBH Primary Mass Distribution Analysis ===")
     print(f"TNG data dir : {args.tng_data_dir}")
@@ -1148,5 +1062,64 @@ def main():
         )
 
 
-if __name__ == "__main__":
-    main()
+def run_emulator_m1_compare_cli(
+    argv: list[str] | None = None,
+    script_path: Path | str | None = None,
+) -> None:
+    """CLI for CFM vs diffusion m₁ comparison (``04_emulator_m1_compare.py``)."""
+    import torch
+
+    script_path = Path(script_path or _EMULATOR_M1_SCRIPT)
+    parser = argparse.ArgumentParser(
+        description="Area-normalised m₁ KDE: CFM vs diffusion at fixed SSPC Λ."
+    )
+    parser.add_argument(
+        "--emulator-output",
+        type=Path,
+        default=None,
+        help="Output PNG (default: plots/04_emulator_m1_compare/<timestamp>/emulator_m1_cfm_vs_diffusion.png).",
+    )
+    parser.add_argument(
+        "--hyperparam-encoded-csv",
+        type=Path,
+        default=HYPERPARAM_TABLE_ENCODED_CSV,
+    )
+    parser.add_argument("--cfm-checkpoint", type=Path, default=CHECKPOINT_DIR / "cfm_final.pt")
+    parser.add_argument("--diffusion-checkpoint", type=Path, default=CHECKPOINT_DIR / "diffusion_final.pt")
+    parser.add_argument("--sfr-a", type=float, default=None)
+    parser.add_argument("--mu0", type=float, default=None)
+    parser.add_argument("--sspc-params-json", type=Path, default=None)
+    parser.add_argument("--n-events", type=int, default=12000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu", "auto"])
+    args = parser.parse_args(argv)
+
+    sspc_means = dict(_DEFAULT_EMULATOR_SSPC_MEANS)
+    if args.sspc_params_json is not None:
+        extra = json.loads(Path(args.sspc_params_json).read_text(encoding="utf-8"))
+        for k, v in extra.items():
+            sspc_means[str(k)] = float(v)
+    sfr_a = float(args.sfr_a) if args.sfr_a is not None else float(sspc_means["sspc_sfr_a_mean"])
+    mu0 = float(args.mu0) if args.mu0 is not None else float(sspc_means["sspc_mu0_mean"])
+    dev = args.device
+    if dev == "auto":
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.emulator_output is not None:
+        out_png = Path(args.emulator_output).resolve()
+    else:
+        out_png = resolve_plot_output(
+            script_path,
+            filename="emulator_m1_cfm_vs_diffusion.png",
+        )
+    make_emulator_m1_compare_figure(
+        output_path=out_png,
+        hyperparam_encoded_csv=Path(args.hyperparam_encoded_csv).resolve(),
+        cfm_checkpoint=Path(args.cfm_checkpoint).resolve(),
+        diffusion_checkpoint=Path(args.diffusion_checkpoint).resolve(),
+        sfr_a=sfr_a,
+        mu0=mu0,
+        sspc_means=sspc_means,
+        n_events=int(args.n_events),
+        seed=int(args.seed),
+        device=str(dev),
+    )

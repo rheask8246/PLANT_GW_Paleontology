@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 from types import ModuleType
@@ -13,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PROJECT_ROOT.parent
 
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+ANALYSIS_DIR = SCRIPTS_DIR / "analysis"
 
 # Step-02 ML artifacts (hyperparam tables, parquets, splits)
 ML_DATA_DIR = PROJECT_ROOT / "data"
@@ -25,10 +27,62 @@ SPLITS_JSON = ML_DATA_DIR / "splits.json"
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
 OBS_NORMALIZER_JSON = CHECKPOINT_DIR / "obs_normalizer.json"
 
+PLOTS_ROOT = PROJECT_ROOT / "plots"
+
+
+def plot_script_stem(script_path: Path | str) -> str:
+    """Python stem used as the plots subdirectory (e.g. ``04_cfm_emulator``)."""
+    return Path(script_path).resolve().stem
+
+
+def plot_run_dir(
+    script_path: Path | str,
+    *,
+    timestamp: str | None = None,
+    mkdir: bool = True,
+) -> Path:
+    """
+    Timestamped output folder: ``plots/{script_stem}/{YYYY-MM-DD_HH-MM-SS}/``.
+
+    *script_path* should be ``Path(__file__)`` of the script that produces the figures.
+    """
+    stem = plot_script_stem(script_path)
+    ts = timestamp or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = PLOTS_ROOT / stem / ts
+    if mkdir:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def resolve_plot_output(
+    script_path: Path | str,
+    *,
+    out: Path | None = None,
+    timestamp: str | None = None,
+    no_timestamp_subdir: bool = False,
+    filename: str | None = None,
+) -> Path:
+    """
+    Resolve a single output file path under ``plots/{script_stem}/``.
+
+    If *out* is set, use it as-is. Otherwise use a timestamped run directory;
+    append *filename* when provided.
+    """
+    if out is not None:
+        path = Path(out).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+    if no_timestamp_subdir:
+        base = PLOTS_ROOT / plot_script_stem(script_path)
+        base.mkdir(parents=True, exist_ok=True)
+        return base / filename if filename else base
+    run_dir = plot_run_dir(script_path, timestamp=timestamp, mkdir=True)
+    return run_dir / filename if filename else run_dir
+
 
 def ensure_paths() -> None:
-    """Put project root (models/) and scripts/ on sys.path."""
-    for p in (PROJECT_ROOT, SCRIPTS_DIR):
+    """Put project root (models/), scripts/, and analysis/ on sys.path."""
+    for p in (PROJECT_ROOT, SCRIPTS_DIR, ANALYSIS_DIR):
         s = str(p)
         if s not in sys.path:
             sys.path.insert(0, s)

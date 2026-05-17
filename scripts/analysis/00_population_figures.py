@@ -1,32 +1,22 @@
 #!/usr/bin/env python3
 """
-Post-training population / intrinsic forward figures from SSPC HDF5.
+Step 00 — Population / intrinsic forward figures from SSPC HDF5.
 
-Produces:
-  - d(aggregated rate proxy)/dz from summed merger-rate weights in z (0–10)
-  - M1, M2, and q = m2/m1 in redshift slices (default z≈0.2 and z≈1.0) per channel
-
-Reuses the same m1(Mc,q) map as `data_distribution_analysis.m1_from_mchirp_q`.
-Outputs under `plots/population_results/<timestamp>/` by default.
+Usage: ``python scripts/analysis/00_population_figures.py``
+SLURM: ``slurm/06_population_figures.sh``
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path as _Path
 
-_PROJECT_ROOT = _Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+_ANALYSIS_DIR = _Path(__file__).resolve().parent
+_PROJECT_ROOT = _ANALYSIS_DIR.parents[2]
+for _p in (_PROJECT_ROOT, _ANALYSIS_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
-from plant_paths import (  # noqa: E402
-    PROJECT_ROOT,
-    REPO_ROOT,
-    SCRIPTS_DIR,
-    ensure_paths,
-    find_data_dir,
-    find_work_dir,
-    load_posterior_network_module,
-)
+from plant_paths import PROJECT_ROOT, ensure_paths, find_data_dir, plot_run_dir  # noqa: E402
 
 ensure_paths()
 
@@ -43,10 +33,9 @@ import numpy as np
 import pandas as pd
 
 # Safe import from same package
-from data_distribution_analysis import m1_from_mchirp_q, load_sspc_rate_vs_redshift
+from lib.distribution import load_sspc_rate_vs_redshift, m1_from_mchirp_q
 
 _DEFAULT_SSPC = PROJECT_ROOT / "data" / "sspc" / "models_sspc.hdf5"
-_DEFAULT_PLOTS = PROJECT_ROOT / "plots" / "population_results"
 
 
 def _collect_m1m2q_at_z(
@@ -182,7 +171,7 @@ def main() -> None:
         "--output-dir",
         type=Path,
         default=None,
-        help="Default: plots/population_results/<timestamp>/",
+        help="Default: plots/00_population_figures/<timestamp>/",
     )
     p.add_argument(
         "--z-slices",
@@ -200,7 +189,7 @@ def main() -> None:
     args = p.parse_args()
     out = args.output_dir
     if out is None:
-        out = _DEFAULT_PLOTS / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        out = plot_run_dir(Path(__file__))
     out = out.resolve()
     print(f"Output directory: {out}")
     run_all(

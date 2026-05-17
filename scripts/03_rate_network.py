@@ -15,7 +15,7 @@ nuisance parameters randomly drawn per grid point during data generation,
 giving broad coverage of the full parameter space.
 
 Input:  hyperparam_table_encoded.csv  +  splits.json  (from 02_build_dataset.py)
-Output: checkpoints/rate_network_best.pt  +  plots/rate_network/<timestamp>/
+Output: checkpoints/rate_network_best.pt  +  plots/03_rate_network/<timestamp>/
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from plant_paths import (  # noqa: E402
     PROJECT_ROOT,
     SPLITS_JSON,
     ensure_paths,
+    plot_run_dir,
 )
 
 ensure_paths()
@@ -58,7 +59,6 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 # ---------------------------------------------------------------------------
 
 HYPERPARAM_CSV = HYPERPARAM_TABLE_ENCODED_CSV
-PLOTS_BASE     = PROJECT_ROOT / "plots" / "rate_network"
 
 LOG_RATE_FLOOR = -5.0
 
@@ -549,8 +549,7 @@ def main():
         sys.exit(f"ERROR: {csv_path} not found. Run 02_build_dataset.py first.")
 
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    plots_dir = PLOTS_BASE / ts
-    plots_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir = plot_run_dir(Path(__file__), timestamp=ts)
 
     # ------------------------------------------------------------------
     print("1. Loading data …")
