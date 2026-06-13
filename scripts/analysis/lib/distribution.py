@@ -3,7 +3,7 @@
 Shared TNG vs SSPC distribution plotting (Figure 5 / Figure 4 style).
 
 Used by ``00_distribution_compare.py`` and ``04_emulator_m1_compare.py``.
-Reproduces Figure 5 of Briel et al. (Fit_SFRD_TNG paper) and overplots
+Reproduces Figure 5 from the Fit_SFRD_TNG workflow and overplots
 the SSPC-generated data so both can be directly compared.
 
 Figure layout (3 rows × 2 columns):
@@ -28,7 +28,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path as _Path
 
-_PROJECT_ROOT = _Path(__file__).resolve().parents[3]
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -708,9 +708,15 @@ def make_figure4(
 # Emulator m₁ comparison (fixed SSPC Λ; CFM vs diffusion)
 # ---------------------------------------------------------------------------
 
-# Training SSPC grid encoding (must match 02_build_dataset.py).
-_SSPC_SFRA_RANGE = (0.010, 0.030)
-_SSPC_MU0_RANGE = (0.010, 0.060)
+# Training SSPC grid encoding (must match 02_build_dataset.py / sspc_param_ranges.py).
+from sspc_param_ranges import (  # noqa: E402
+    MU0_RANGE,
+    SFRA_RANGE,
+    VAN_SON_BEST_FIT,
+)
+
+_SSPC_SFRA_RANGE = SFRA_RANGE
+_SSPC_MU0_RANGE = MU0_RANGE
 _SSPC_PARAM_COLS = [
     "sspc_sfr_a",
     "sspc_sfr_b",
@@ -724,18 +730,18 @@ _SSPC_PARAM_COLS = [
 ]
 _CHANNEL_TO_ID = {"CE": 0, "CHE": 1, "GC": 2, "NSC": 3, "SMT": 4}
 
-# Default fixed Λ for --emulator-m1-compare (TNG100-1 best-fit style; aligned with
-# ``00_sspc_data_generation.py`` / Briel+ Table 1 comment block there).
+# Default fixed Λ for --emulator-m1-compare (aligned with Step-00 best-fit values
+# from DOI:10.3847/1538-4357/acbf51).
 _DEFAULT_EMULATOR_SSPC_MEANS = {
-    "sspc_sfr_a_mean": 0.0172,
-    "sspc_sfr_b_mean": 1.4425,
-    "sspc_sfr_c_mean": 4.5299,
-    "sspc_sfr_d_mean": 6.2261,
-    "sspc_mu0_mean": 0.0247,
-    "sspc_muz_mean": -0.0521,
-    "sspc_sigma0_mean": 1.1509,
-    "sspc_sigmaz_mean": 0.0477,
-    "sspc_alpha_skew_mean": -1.8801,
+    "sspc_sfr_a_mean": VAN_SON_BEST_FIT["sfr_a"],
+    "sspc_sfr_b_mean": VAN_SON_BEST_FIT["sfr_b"],
+    "sspc_sfr_c_mean": VAN_SON_BEST_FIT["sfr_c"],
+    "sspc_sfr_d_mean": VAN_SON_BEST_FIT["sfr_d"],
+    "sspc_mu0_mean": VAN_SON_BEST_FIT["mu0"],
+    "sspc_muz_mean": VAN_SON_BEST_FIT["muz"],
+    "sspc_sigma0_mean": VAN_SON_BEST_FIT["sigma0"],
+    "sspc_sigmaz_mean": VAN_SON_BEST_FIT["sigmaz"],
+    "sspc_alpha_skew_mean": VAN_SON_BEST_FIT["alpha_skew"],
 }
 
 
@@ -798,11 +804,12 @@ def make_emulator_m1_compare_figure(
     n_events: int,
     seed: int,
     device: str,
+    naive_bayes_checkpoint: Path | None = None,
 ) -> None:
     """
     Three stacked panels (Figure 5–style channel rows): all = CE+SMT stacked samples,
-    then SMT-only, then CE-only. Each panel overlays CFM vs diffusion emulators
-    (area-normalised m₁ KDE). No TNG / paper overlay.
+    then SMT-only, then CE-only. Each panel overlays CFM vs diffusion (and optional NB)
+    emulators (area-normalised m₁ KDE). No TNG / paper overlay.
     """
     import torch
 
@@ -853,15 +860,28 @@ def make_emulator_m1_compare_figure(
         seed_ctr += 1
         return s
 
-    for kind, ckpt in (("cfm", cfm_checkpoint), ("diffusion", diffusion_checkpoint)):
-        ckpt = Path(ckpt).resolve()
+    emulator_specs: list[tuple[str, Path]] = [
+        ("cfm", Path(cfm_checkpoint)),
+        ("diffusion", Path(diffusion_checkpoint)),
+    ]
+    if naive_bayes_checkpoint is not None:
+        nb_p = Path(naive_bayes_checkpoint).resolve()
+        if nb_p.is_file():
+            emulator_specs.append(("naive_bayes", nb_p))
+        else:
+            print(f"[WARN] naive-bayes checkpoint not found, skipping: {nb_p}", flush=True)
+
+    for kind, ckpt in emulator_specs:
+        ckpt = ckpt.resolve()
         if not ckpt.is_file():
             raise FileNotFoundError(f"Missing {kind} checkpoint: {ckpt}")
         model, lambda_cols, nrm = load_frozen_emulator(ckpt, dev, kind)
         if kind == "cfm":
             from models.cfm_emulator import generate_catalog as _gc
-        else:
+        elif kind == "diffusion":
             from models.diffusion_emulator import generate_catalog as _gc
+        else:
+            from models.naive_bayes_emulator import generate_catalog as _gc
         lam_cols = list(lambda_cols)
         emulators.append((kind, str(ckpt.name), model, nrm, lam_cols, _gc))
         meta[kind] = {"checkpoint": str(ckpt), "lambda_cols": lam_cols}
@@ -919,7 +939,7 @@ def make_emulator_m1_compare_figure(
     row_keys = ["all_ce_smt", "SMT", "CE"]
 
     fig, axes = plt.subplots(3, 1, sharex=True, sharey=True, figsize=(9, 10.5))
-    colors = {"cfm": "#785EF0", "diffusion": "#DC267F"}
+    colors = {"cfm": "#785EF0", "diffusion": "#DC267F", "naive_bayes": "#648FFF"}
     for ax, rtitle, pkey in zip(axes, row_titles, row_keys):
         for kind, ckname, *_ in emulators:
             kde = kdes[pkey][kind]
@@ -928,7 +948,7 @@ def make_emulator_m1_compare_figure(
                 kde,
                 lw=2.0,
                 color=colors.get(kind, "C0"),
-                label=f"{kind.upper()} ({ckname})",
+                label=f"{kind.replace('_', ' ').upper()} ({ckname})",
             )
         ax.set_yscale("log")
         ax.set_xlim(*_EMULATOR_M1_XLIM)
@@ -947,7 +967,7 @@ def make_emulator_m1_compare_figure(
     )
     axes[-1].set_xlabel(r"$M_{\mathrm{BH,1}} \ [\mathrm{M}_\odot]$", fontsize=13)
     fig.suptitle(
-        "CFM vs diffusion — primary mass at fixed SSPC Λ\n"
+        "Emulator comparison — primary mass at fixed SSPC Λ\n"
         r"(TNG100-1-style reference SSPC; $\Lambda$ encoded like training grid)",
         fontsize=11,
         y=0.995,
@@ -1086,6 +1106,12 @@ def run_emulator_m1_compare_cli(
     )
     parser.add_argument("--cfm-checkpoint", type=Path, default=CHECKPOINT_DIR / "cfm_final.pt")
     parser.add_argument("--diffusion-checkpoint", type=Path, default=CHECKPOINT_DIR / "diffusion_final.pt")
+    parser.add_argument(
+        "--naive-bayes-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional checkpoints/naive_bayes_final.pt for third KDE curve.",
+    )
     parser.add_argument("--sfr-a", type=float, default=None)
     parser.add_argument("--mu0", type=float, default=None)
     parser.add_argument("--sspc-params-json", type=Path, default=None)
@@ -1111,6 +1137,11 @@ def run_emulator_m1_compare_cli(
             script_path,
             filename="emulator_m1_cfm_vs_diffusion.png",
         )
+    nb_ckpt = (
+        Path(args.naive_bayes_checkpoint).resolve()
+        if args.naive_bayes_checkpoint is not None
+        else (CHECKPOINT_DIR / "naive_bayes_final.pt")
+    )
     make_emulator_m1_compare_figure(
         output_path=out_png,
         hyperparam_encoded_csv=Path(args.hyperparam_encoded_csv).resolve(),
@@ -1122,4 +1153,5 @@ def run_emulator_m1_compare_cli(
         n_events=int(args.n_events),
         seed=int(args.seed),
         device=str(dev),
+        naive_bayes_checkpoint=nb_ckpt if nb_ckpt.is_file() else None,
     )

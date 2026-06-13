@@ -18,7 +18,7 @@ import sys
 from pathlib import Path as _Path
 
 _ANALYSIS_DIR = _Path(__file__).resolve().parent
-_PROJECT_ROOT = _ANALYSIS_DIR.parents[2]
+_PROJECT_ROOT = _ANALYSIS_DIR.parents[1]
 for _p in (_PROJECT_ROOT, _ANALYSIS_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
@@ -617,7 +617,7 @@ def run_validation(cfg: ValidationConfig) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    default_root = Path(__file__).resolve().parents[2]
+    default_root = Path(__file__).resolve().parents[1]
     p = argparse.ArgumentParser(description="Run intrinsic data validation suite.")
     p.add_argument("--project-root", type=Path, default=default_root, help="Path to PLANT_GW_Paleontology root")
     p.add_argument("--events-parquet", type=Path, default=None, help="Override intrinsic events parquet path")

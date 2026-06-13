@@ -42,7 +42,7 @@ import sys
 from pathlib import Path as _Path
 
 _ANALYSIS_DIR = _Path(__file__).resolve().parent
-_PROJECT_ROOT = _ANALYSIS_DIR.parents[2]
+_PROJECT_ROOT = _ANALYSIS_DIR.parents[1]
 for _p in (_PROJECT_ROOT, _ANALYSIS_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
@@ -133,6 +133,8 @@ def _generate_catalog(emulator, kind: str, lambda_vec: np.ndarray, n_events: int
         from models.cfm_emulator import generate_catalog
     elif kind == "diffusion":
         from models.diffusion_emulator import generate_catalog
+    elif kind == "naive_bayes":
+        from models.naive_bayes_emulator import generate_catalog
     else:
         raise ValueError(f"Unknown emulator kind {kind!r}")
     return generate_catalog(np.asarray(lambda_vec, dtype=np.float32), int(n_events), emulator, normalizer)
@@ -1009,6 +1011,12 @@ def main() -> None:
     p.add_argument("--checkpoint-dir", type=Path, default=None, help="Default: ./checkpoints")
     p.add_argument("--cfm-checkpoint", type=Path, default=None, help="Default: checkpoints/cfm_final.pt")
     p.add_argument("--diffusion-checkpoint", type=Path, default=None, help="Default: checkpoints/diffusion_final.pt")
+    p.add_argument(
+        "--naive-bayes-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional: checkpoints/naive_bayes_final.pt for extra NB rate/marginal estimates.",
+    )
     p.add_argument("--device", type=str, default="auto", help="auto | cuda | cpu")
     p.add_argument(
         "--out-dir",
@@ -1096,6 +1104,11 @@ def main() -> None:
     ckpt_dir = args.checkpoint_dir.resolve() if args.checkpoint_dir else CHECKPOINT_DIR
     cfm_ckpt = args.cfm_checkpoint.resolve() if args.cfm_checkpoint else (ckpt_dir / "cfm_final.pt")
     dif_ckpt = args.diffusion_checkpoint.resolve() if args.diffusion_checkpoint else (ckpt_dir / "diffusion_final.pt")
+    nb_ckpt = (
+        args.naive_bayes_checkpoint.resolve()
+        if args.naive_bayes_checkpoint
+        else (ckpt_dir / "naive_bayes_final.pt")
+    )
 
     out_dir = args.out_dir.resolve() if args.out_dir else plot_run_dir(Path(__file__))
 
@@ -1122,8 +1135,10 @@ def main() -> None:
 
     plot_cfm: Optional[RateGrid] = None
     plot_dif: Optional[RateGrid] = None
+    plot_nb: Optional[RateGrid] = None
     cfm_marg: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
     dif_marg: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
+    nb_marg: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
 
     vmin, vmax = float(args.vmin), float(args.vmax)
     uncmin, uncmax = float(args.uncmin), float(args.uncmax)
@@ -1215,6 +1230,64 @@ def main() -> None:
             m_clip_hi=float(args.m12_max),
         )
 
+    if nb_ckpt.is_file() and (("1" in figs) or ("2" in figs) or ("3" in figs)):
+        print(f"[main] loading Naive Bayes checkpoint: {nb_ckpt}", flush=True)
+        nb_model, nb_lambda_cols, nb_nrm = _load_emulator(nb_ckpt, device, "naive_bayes")
+        for c in nb_lambda_cols:
+            if c not in hp.columns:
+                raise ValueError(f"Column {c!r} required by NB checkpoint is missing from {hp_csv}.")
+        if "1" in figs:
+            grid_nb = _estimate_rate_grid(
+                hp_df=hp,
+                lambda_cols=nb_lambda_cols,
+                emulator=nb_model,
+                emulator_kind="naive_bayes",
+                normalizer=nb_nrm,
+                nbins=args.nbins,
+                mmax=args.mmax,
+                n_rows_per_boot=args.n_rows,
+                n_events_per_row=args.n_events_per_row,
+                n_boot=args.n_boot,
+                seed=args.seed + 2,
+            )
+            plot_nb = _postprocess_grid_for_display(
+                grid_nb,
+                smooth_sigma=float(args.smooth_sigma),
+                smooth_unc_sigma=float(args.smooth_unc_sigma),
+                fullpop_m1m2_scale=bool(args.fullpop_m1m2_scale),
+            )
+            np.savez_compressed(
+                out_dir / "naive_bayes_rate_grid.npz",
+                rate=plot_nb.rate,
+                frac_unc=plot_nb.frac_unc,
+            )
+            print(f"[main] saved {out_dir / 'naive_bayes_rate_grid.npz'}", flush=True)
+        if ("2" in figs) or ("3" in figs):
+            m_edges = np.linspace(1.0, float(args.m12_max), int(args.m12_bins) + 1)
+            nb_marg = _estimate_1d_marginals_from_emulator(
+                hp_df=hp,
+                lambda_cols=nb_lambda_cols,
+                emulator=nb_model,
+                emulator_kind="naive_bayes",
+                normalizer=nb_nrm,
+                m_edges=m_edges,
+                n_rows_per_boot=args.n_rows,
+                n_events_per_row=args.n_events_per_row,
+                n_boot=args.n_boot,
+                seed=args.seed + 12,
+                m_clip_hi=float(args.m12_max),
+            )
+            np.savez_compressed(
+                out_dir / "naive_bayes_marginals.npz",
+                m_edges=m_edges,
+                hist=nb_marg[0],
+                err_lo=nb_marg[1],
+                err_hi=nb_marg[2],
+            )
+            print(f"[main] saved {out_dir / 'naive_bayes_marginals.npz'}", flush=True)
+    elif args.naive_bayes_checkpoint is not None and not nb_ckpt.is_file():
+        print(f"[main] WARN: naive-bayes checkpoint not found, skipping NB: {nb_ckpt}", flush=True)
+
     paper_fullpop = paper_bgp = None
     if need_paper and ("1" in figs):
         print("[main] loading paper Figure-1 grids ...", flush=True)
@@ -1271,6 +1344,9 @@ def main() -> None:
         "hyperparam_csv": str(hp_csv),
         "cfm_checkpoint": str(cfm_ckpt),
         "diffusion_checkpoint": str(dif_ckpt),
+        "naive_bayes_checkpoint": str(nb_ckpt) if nb_ckpt.is_file() else None,
+        "naive_bayes_rate_saved": bool(plot_nb is not None),
+        "naive_bayes_marginals_saved": bool(nb_marg is not None),
         "gwtc4_data_release": str(args.gwtc4_data_release) if args.gwtc4_data_release else None,
         "gwtc3_powerlawpeak_dir": str(args.gwtc3_powerlawpeak_dir) if args.gwtc3_powerlawpeak_dir else None,
         "usetex_requested": not bool(args.no_tex),

@@ -14,7 +14,8 @@ Outputs (under ``data/`` by default):
 - data/all_events.parquet           : Intrinsic merger-rate samples (N_sample per grid point); main input for 04/04b
 - data/all_detected_events.parquet  : Optional detection-subsampled table (N_det per grid) for other analyses
 - data/splits.json                   : Train/val/test grid point indices (stratified by channel)
-- checkpoints/obs_normalizer.json   : Observable normalizer (written to project ``checkpoints/``)
+- {out_dir}/checkpoints/obs_normalizer.json : Observable normalizer (self-contained under custom ``--out-dir``)
+- checkpoints/obs_normalizer.json           : Same file when ``--out-dir`` is the default ``data/``
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 from plant_paths import (  # noqa: E402
     ALL_DETECTED_EVENTS_PARQUET,
     ALL_EVENTS_PARQUET,
-    CHECKPOINT_DIR,
     HYPERPARAM_TABLE_CSV,
     HYPERPARAM_TABLE_ENCODED_CSV,
     OBS_NORMALIZER_JSON,
@@ -46,13 +46,19 @@ ensure_paths()
 
 import argparse
 import json
+import multiprocessing as mp
+import os
 import re
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
+
+# Populated in the parent before fork-based worker pools (Linux/HPC).
+_BUILD_POOL: Dict[str, Any] = {}
 
 # =============================================================================
 # CONFIGURABLE PATHS (all paths defined here)
@@ -67,15 +73,53 @@ N_SAMPLE = 5000   # events per grid point (weighted)
 N_DET = 2000      # events per grid point (detection-weighted)
 PDET_THRESHOLD = 0.01  # for n_detectable count
 
+
+def default_normalizer_path(out_dir: Path) -> Path:
+    """Project ``checkpoints/`` for default ``data/``; else under the dataset directory."""
+    if out_dir.resolve() == ML_DATA_DIR.resolve():
+        return OBS_NORMALIZER_JSON
+    return out_dir / "checkpoints" / "obs_normalizer.json"
+
 # ── Zenodo (Zevin) normalization ranges ──────────────────────────────────────
 CHI_B_RANGE    = (0.0,  0.5)
 ALPHA_CE_RANGE = (0.2,  5.0)
 
+# Comoving volume for SSPC intrinsic rate density (matches 00_sspc_data_generation.py / Planck18)
+SSPC_MAX_REDSHIFT = 10.0
+
+
+def sspc_comoving_volume_gpc3(z_max: float = SSPC_MAX_REDSHIFT) -> float:
+    """Comoving volume [Gpc³] out to *z_max* (same cosmology as Step 00)."""
+    import astropy.units as u
+    from astropy.cosmology import Planck18
+
+    return float(Planck18.comoving_volume(z_max).to(u.Gpc**3).value)
+
+
 # ── SSPC normalization ranges (sfr_a × mu0 grid) ─────────────────────────────
-SSPC_SFRA_RANGE = (0.010, 0.030)   # Madau-Dickinson SFR amplitude (matches 00_sspc_data_generation.py)
-SSPC_MU0_RANGE  = (0.010, 0.060)   # mean metallicity at z=0       (matches 00_sspc_data_generation.py)
+# Must match scripts/sspc_param_ranges.py / 00_sspc_data_generation.py.
+from sspc_param_ranges import MU0_RANGE as SSPC_MU0_RANGE  # noqa: E402
+from sspc_param_ranges import SFRA_RANGE as SSPC_SFRA_RANGE  # noqa: E402
 # Minimum z for storage / log10(z); must match 00_sspc_data_generation.Z_LOG_FLOOR
 Z_LOG_FLOOR = 1e-6
+
+
+def configure_worker_threads(workers: int) -> int:
+    """Set threaded-kernel worker counts for CPU-heavy parquet/numpy operations."""
+    w = max(1, int(workers))
+    os.environ["OMP_NUM_THREADS"] = str(w)
+    os.environ["MKL_NUM_THREADS"] = str(w)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(w)
+    os.environ["NUMEXPR_NUM_THREADS"] = str(w)
+    return w
+
+
+def _worker_init() -> None:
+    """One BLAS thread per process when using a process pool."""
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 # Zenodo (Zevin): five formation channels
 CHANNEL_TO_ID = {"CE": 0, "CHE": 1, "GC": 2, "NSC": 3, "SMT": 4}
@@ -183,74 +227,159 @@ def iter_grid_keys(hdf5_path: Path, data_source: str = "auto"):
         store.close()
 
 
-def build_hyperparam_table(hdf5_path: Path, data_source: str = "auto") -> pd.DataFrame:
+def _hyperparam_row_from_key(
+    hdf5_path: Path,
+    data_source: str,
+    key: str,
+    channel: str,
+    ch_id: int,
+    p1: float,
+    p2: float,
+    *,
+    v_gpc3_sspc: float | None = None,
+) -> Dict[str, object]:
+    """Read one HDF5 grid group and return a hyperparam_table row."""
+    df = pd.read_hdf(hdf5_path, key=key)
+    n_systems = len(df)
+    weight = df["weight"].values if "weight" in df.columns else np.ones(n_systems)
+    pdet_col = "pdet_midhighlatelow_network"
+    pdet = df[pdet_col].values if pdet_col in df.columns else np.ones(n_systems)
+
+    w_arr = np.asarray(weight, dtype=np.float64)
+    sum_weight = float(np.sum(w_arr))
+    sum_weight_sq = float(np.sum(w_arr * w_arr))
+    sum_pdet_raw = float(np.sum(pdet))
+    n_detectable = int(np.sum(pdet > PDET_THRESHOLD))
+    w_eff = np.asarray(weight * pdet, dtype=np.float64)
+    w_eff_sum = float(np.sum(w_eff))
+
+    if data_source == "sspc":
+        sum_pdet = sum_weight
+    else:
+        sum_pdet = sum_pdet_raw
+
+    ratio = sum_pdet / n_systems if n_systems > 0 else 0.0
+    log_efficiency = np.log10(ratio) if ratio > 0 else -999.0
+
+    row_data: Dict[str, object] = {
+        "key": key,
+        "channel": channel,
+        "n_systems": n_systems,
+        "sum_weight": sum_weight,
+        "sum_weight_sq": sum_weight_sq,
+        "sum_pdet": sum_pdet,
+        "log_efficiency": log_efficiency,
+        "n_detectable": n_detectable,
+    }
+    if data_source == "sspc":
+        row_data["sfra"] = p1
+        row_data["mu0"] = p2
+        if n_systems > 0 and sum_weight > 0.0:
+            intrinsic_rate_yr = n_systems * sum_weight_sq / sum_weight
+        else:
+            intrinsic_rate_yr = 0.0
+        v_gpc3 = float(v_gpc3_sspc if v_gpc3_sspc is not None else sspc_comoving_volume_gpc3())
+        row_data["intrinsic_rate_yr"] = intrinsic_rate_yr
+        row_data["rate_per_gpc3_yr"] = (
+            intrinsic_rate_yr / v_gpc3 if v_gpc3 > 0.0 else 0.0
+        )
+    else:
+        row_data["chi_b"] = p1
+        row_data["alpha_CE"] = p2
+
+    w_sspc = np.asarray(weight, dtype=np.float64)
+    w_sspc_sum = float(np.sum(w_sspc))
+    for col in SSPC_PARAM_COLS:
+        if col in df.columns:
+            x = df[col].values.astype(np.float64)
+            if data_source == "sspc":
+                w_use, wsum = w_sspc, w_sspc_sum
+            else:
+                w_use, wsum = w_eff, w_eff_sum
+            if wsum > 0:
+                mean_x = float(np.sum(w_use * x) / wsum)
+                var_x = float(np.sum(w_use * (x - mean_x) ** 2) / wsum)
+                std_x = float(np.sqrt(max(var_x, 0.0)))
+            else:
+                mean_x = float(np.mean(x))
+                std_x = float(np.std(x))
+            row_data[f"{col}_mean"] = mean_x
+            row_data[f"{col}_std"] = std_x
+
+    return row_data
+
+
+def _hyperparam_task(task_idx: int) -> Tuple[int, Dict[str, object]]:
+    meta = _BUILD_POOL["grid_meta"][task_idx]
+    key, channel, ch_id, p1, p2 = meta
+    row = _hyperparam_row_from_key(
+        _BUILD_POOL["hdf5_path"],
+        _BUILD_POOL["data_source"],
+        key,
+        channel,
+        int(ch_id),
+        float(p1),
+        float(p2),
+        v_gpc3_sspc=_BUILD_POOL.get("v_gpc3_sspc"),
+    )
+    return task_idx, row
+
+
+def build_hyperparam_table(
+    hdf5_path: Path,
+    data_source: str = "auto",
+    *,
+    workers: int = 1,
+) -> pd.DataFrame:
     """Build hyperparam_table.csv with per-grid-point stats."""
+    global _BUILD_POOL
     if data_source == "auto":
         data_source = _detect_data_source(hdf5_path)
-    rows = []
-    for key, channel, ch_id, p1, p2 in iter_grid_keys(hdf5_path, data_source):
-        df = pd.read_hdf(hdf5_path, key=key)
-        n_systems = len(df)
-        weight = df["weight"].values if "weight" in df.columns else np.ones(n_systems)
-        pdet_col = "pdet_midhighlatelow_network"
-        pdet = df[pdet_col].values if pdet_col in df.columns else np.ones(n_systems)
 
-        sum_weight = float(np.sum(weight))
-        sum_pdet_raw = float(np.sum(pdet))
-        n_detectable = int(np.sum(pdet > PDET_THRESHOLD))
-        w_eff = np.asarray(weight * pdet, dtype=np.float64)
-        w_eff_sum = float(np.sum(w_eff))
+    grid_meta = list(iter_grid_keys(hdf5_path, data_source))
+    n = len(grid_meta)
+    if n == 0:
+        return pd.DataFrame()
 
-        # For SSPC data (intrinsic, pdet-free): use sum of intrinsic merger-rate
-        # weights as the rate target.  For Zenodo data sum(pdet) is conventional.
-        if data_source == "sspc":
-            sum_pdet = sum_weight      # intrinsic merger rate total
-        else:
-            sum_pdet = sum_pdet_raw    # keep original Zenodo behavior
+    rows: List[Dict[str, object] | None] = [None] * n
+    workers = max(1, int(workers))
 
-        # log_efficiency = log10(rate_target / n_systems); avoid log(0)
-        ratio = sum_pdet / n_systems if n_systems > 0 else 0.0
-        log_efficiency = np.log10(ratio) if ratio > 0 else -999.0  # sentinel for zero
-
-        row_data: Dict[str, object] = {
-            "key": key,
-            "channel": channel,
-            "n_systems": n_systems,
-            "sum_weight": sum_weight,
-            "sum_pdet": sum_pdet,
-            "log_efficiency": log_efficiency,
-            "n_detectable": n_detectable,
+    if workers <= 1:
+        v_gpc3 = sspc_comoving_volume_gpc3() if data_source == "sspc" else None
+        for i, (key, channel, ch_id, p1, p2) in enumerate(grid_meta):
+            rows[i] = _hyperparam_row_from_key(
+                hdf5_path, data_source, key, channel, ch_id, p1, p2, v_gpc3_sspc=v_gpc3,
+            )
+            if (i + 1) % max(1, n // 20) == 0 or i + 1 == n:
+                print(f"   [hyperparam] {100.0 * (i + 1) / n:5.1f}%", flush=True)
+    else:
+        _BUILD_POOL = {
+            "hdf5_path": hdf5_path,
+            "data_source": data_source,
+            "grid_meta": grid_meta,
+            "v_gpc3_sspc": sspc_comoving_volume_gpc3() if data_source == "sspc" else None,
         }
-        if data_source == "sspc":
-            row_data["sfra"] = p1
-            row_data["mu0"] = p2
-        else:
-            row_data["chi_b"] = p1
-            row_data["alpha_CE"] = p2
+        print(f"   [hyperparam] {workers} worker processes, {n} grid keys", flush=True)
 
-        # Optional SSPC parameters: aggregate at grid level if present.
-        # SSPC: use intrinsic weights only (no pdet) so nuisance means match the pipeline.
-        w_sspc = np.asarray(weight, dtype=np.float64)
-        w_sspc_sum = float(np.sum(w_sspc))
-        for col in SSPC_PARAM_COLS:
-            if col in df.columns:
-                x = df[col].values.astype(np.float64)
-                if data_source == "sspc":
-                    w_use, wsum = w_sspc, w_sspc_sum
-                else:
-                    w_use, wsum = w_eff, w_eff_sum
-                if wsum > 0:
-                    mean_x = float(np.sum(w_use * x) / wsum)
-                    var_x = float(np.sum(w_use * (x - mean_x) ** 2) / wsum)
-                    std_x = float(np.sqrt(max(var_x, 0.0)))
-                else:
-                    mean_x = float(np.mean(x))
-                    std_x = float(np.std(x))
-                row_data[f"{col}_mean"] = mean_x
-                row_data[f"{col}_std"] = std_x
+        done = 0
+        ctx = mp.get_context("fork")
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=ctx,
+            initializer=_worker_init,
+        ) as ex:
+            futures = [ex.submit(_hyperparam_task, i) for i in range(n)]
+            for fut in as_completed(futures):
+                idx, row = fut.result()
+                rows[idx] = row
+                done += 1
+                if done % max(1, n // 20) == 0 or done == n:
+                    print(
+                        f"   [hyperparam] {100.0 * done / n:5.1f}% ({workers} workers)",
+                        flush=True,
+                    )
 
-        rows.append(row_data)
-    return pd.DataFrame(rows)
+    return pd.DataFrame([r for r in rows if r is not None])
 
 
 def encode_hyperparams(df: pd.DataFrame, data_source: str = "zenodo") -> pd.DataFrame:
@@ -360,6 +489,8 @@ def sample_events_for_grid(
     lambda_vec: List[float],
     n: int,
     use_detection_weight: bool,
+    *,
+    rng: np.random.Generator | None = None,
 ) -> pd.DataFrame:
     """Sample n events from df with optional detection weighting."""
     n_rows = len(df)
@@ -381,7 +512,10 @@ def sample_events_for_grid(
     else:
         probs = probs / probs_sum
 
-    idx = np.random.choice(n_rows, size=n, replace=True, p=probs)
+    if rng is None:
+        idx = np.random.choice(n_rows, size=n, replace=True, p=probs)
+    else:
+        idx = rng.choice(n_rows, size=n, replace=True, p=probs)
     sampled = df.iloc[idx]
 
     # Build output row
@@ -403,18 +537,75 @@ def sample_events_for_grid(
     return result
 
 
+def _grid_sample_seed(base_seed: int, grid_idx: int, *, det: bool) -> int:
+    """Stable per-grid RNG seed (independent of worker scheduling order)."""
+    off = 1 if det else 0
+    return int(base_seed) + int(grid_idx) * 10007 + off
+
+
+def _process_one_grid_events(grid_idx: int) -> Tuple[int, pd.DataFrame, pd.DataFrame]:
+    """Read one HDF5 group and return intrinsic + detection-weighted samples."""
+    pool = _BUILD_POOL
+    row = pool["encoded_rows"][grid_idx]
+    hdf5_path: Path = pool["hdf5_path"]
+    n_sample = int(pool["n_sample"])
+    n_det = int(pool["n_det"])
+    sample_seed = int(pool["sample_seed"])
+    lambda_cols: List[str] = pool["lambda_cols"]
+    p1c: str = pool["p1c"]
+    p2c: str = pool["p2c"]
+
+    key = row["key"]
+    lambda_vec = [float(row[c]) for c in lambda_cols]
+    df = pd.read_hdf(hdf5_path, key=key)
+
+    ev = sample_events_for_grid(
+        df,
+        grid_idx,
+        int(row["channel_id"]),
+        float(row[p1c]),
+        float(row[p2c]),
+        p1c,
+        p2c,
+        lambda_vec,
+        n_sample,
+        use_detection_weight=False,
+        rng=np.random.default_rng(_grid_sample_seed(sample_seed, grid_idx, det=False)),
+    )
+    ev_det = sample_events_for_grid(
+        df,
+        grid_idx,
+        int(row["channel_id"]),
+        float(row[p1c]),
+        float(row[p2c]),
+        p1c,
+        p2c,
+        lambda_vec,
+        n_det,
+        use_detection_weight=True,
+        rng=np.random.default_rng(_grid_sample_seed(sample_seed, grid_idx, det=True)),
+    )
+    return grid_idx, ev, ev_det
+
+
 def build_event_datasets(
     encoded_df: pd.DataFrame,
     hdf5_path: Path,
     n_sample: int,
     n_det: int,
     data_source: str,
+    *,
+    workers: int = 1,
+    sample_seed: int = 42,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Build all_events.parquet and all_detected_events.parquet."""
-    all_events = []
-    all_detected = []
+    global _BUILD_POOL
 
     encoded_df = encoded_df.reset_index(drop=True)
+    n = len(encoded_df)
+    if n == 0:
+        return pd.DataFrame(), pd.DataFrame()
+
     lambda_cols = sorted(
         [c for c in encoded_df.columns if c.startswith("lambda_")],
         key=lambda x: int(x.split("_")[1]),
@@ -423,32 +614,92 @@ def build_event_datasets(
         p1c, p2c = "sfra_norm", "mu0_norm"
     else:
         p1c, p2c = "chi_b_norm", "alpha_CE_norm"
-    for grid_idx in range(len(encoded_df)):
-        row = encoded_df.iloc[grid_idx]
-        key = row["key"]
-        lambda_vec = [float(row[c]) for c in lambda_cols]
-        df = pd.read_hdf(hdf5_path, key=key)
 
-        # Weighted sample
-        ev = sample_events_for_grid(
-            df, grid_idx, int(row["channel_id"]),
-            float(row[p1c]), float(row[p2c]), p1c, p2c,
-            lambda_vec, n_sample, use_detection_weight=False,
-        )
-        if len(ev) > 0:
-            all_events.append(ev)
+    workers = max(1, int(workers))
+    all_events_parts: List[pd.DataFrame | None] = [None] * n
+    all_detected_parts: List[pd.DataFrame | None] = [None] * n
 
-        # Detection-weighted sample
-        ev_det = sample_events_for_grid(
-            df, grid_idx, int(row["channel_id"]),
-            float(row[p1c]), float(row[p2c]), p1c, p2c,
-            lambda_vec, n_det, use_detection_weight=True,
-        )
-        if len(ev_det) > 0:
-            all_detected.append(ev_det)
+    if workers <= 1:
+        for grid_idx in range(n):
+            row = encoded_df.iloc[grid_idx]
+            key = row["key"]
+            lambda_vec = [float(row[c]) for c in lambda_cols]
+            df = pd.read_hdf(hdf5_path, key=key)
+            ev = sample_events_for_grid(
+                df,
+                grid_idx,
+                int(row["channel_id"]),
+                float(row[p1c]),
+                float(row[p2c]),
+                p1c,
+                p2c,
+                lambda_vec,
+                n_sample,
+                use_detection_weight=False,
+                rng=np.random.default_rng(
+                    _grid_sample_seed(sample_seed, grid_idx, det=False)
+                ),
+            )
+            ev_det = sample_events_for_grid(
+                df,
+                grid_idx,
+                int(row["channel_id"]),
+                float(row[p1c]),
+                float(row[p2c]),
+                p1c,
+                p2c,
+                lambda_vec,
+                n_det,
+                use_detection_weight=True,
+                rng=np.random.default_rng(
+                    _grid_sample_seed(sample_seed, grid_idx, det=True)
+                ),
+            )
+            if len(ev) > 0:
+                all_events_parts[grid_idx] = ev
+            if len(ev_det) > 0:
+                all_detected_parts[grid_idx] = ev_det
+            if (grid_idx + 1) % max(1, n // 20) == 0 or grid_idx + 1 == n:
+                print(f"   [events] {100.0 * (grid_idx + 1) / n:5.1f}%", flush=True)
+    else:
+        _BUILD_POOL = {
+            "hdf5_path": hdf5_path,
+            "encoded_rows": encoded_df.to_dict("records"),
+            "n_sample": n_sample,
+            "n_det": n_det,
+            "sample_seed": sample_seed,
+            "lambda_cols": lambda_cols,
+            "p1c": p1c,
+            "p2c": p2c,
+        }
+        print(f"   [events] {workers} worker processes, {n} grid keys", flush=True)
+        done = 0
+        ctx = mp.get_context("fork")
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=ctx,
+            initializer=_worker_init,
+        ) as ex:
+            futures = [ex.submit(_process_one_grid_events, i) for i in range(n)]
+            for fut in as_completed(futures):
+                grid_idx, ev, ev_det = fut.result()
+                if len(ev) > 0:
+                    all_events_parts[grid_idx] = ev
+                if len(ev_det) > 0:
+                    all_detected_parts[grid_idx] = ev_det
+                done += 1
+                if done % max(1, n // 20) == 0 or done == n:
+                    print(
+                        f"   [events] {100.0 * done / n:5.1f}% ({workers} workers)",
+                        flush=True,
+                    )
 
+    all_events = [df for df in all_events_parts if df is not None]
+    all_detected = [df for df in all_detected_parts if df is not None]
     all_events_df = pd.concat(all_events, ignore_index=True) if all_events else pd.DataFrame()
-    all_detected_df = pd.concat(all_detected, ignore_index=True) if all_detected else pd.DataFrame()
+    all_detected_df = (
+        pd.concat(all_detected, ignore_index=True) if all_detected else pd.DataFrame()
+    )
     return all_events_df, all_detected_df
 
 
@@ -538,6 +789,12 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--n-sample", type=int, default=N_SAMPLE)
     parser.add_argument("--n-det", type=int, default=N_DET)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.environ.get("SLURM_CPUS_PER_TASK", "1")),
+        help="Parallel worker processes over grid keys (default: SLURM_CPUS_PER_TASK or 1).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--data-source", type=str, default="auto",
@@ -545,7 +802,22 @@ def main() -> None:
         help="Key format in the HDF5: 'zenodo' (chi_b/alpha_CE) or 'sspc' (sfr_a/mu0). "
              "'auto' detects from the file (default).",
     )
+    parser.add_argument(
+        "--normalizer-out",
+        type=Path,
+        default=None,
+        help=(
+            "Path for obs_normalizer.json (default: checkpoints/ under --out-dir, "
+            "or project checkpoints/ when --out-dir is data/)."
+        ),
+    )
     args = parser.parse_args()
+    workers = max(1, int(args.workers))
+    if workers > 1:
+        _worker_init()
+    else:
+        configure_worker_threads(workers)
+    print(f"   Parallel worker processes: {workers}", flush=True)
 
     np.random.seed(args.seed)
     data_source = args.data_source
@@ -561,9 +833,18 @@ def main() -> None:
     all_events_pq = out_dir / "all_events.parquet"
     all_detected_pq = out_dir / "all_detected_events.parquet"
     splits_json = out_dir / "splits.json"
+    normalizer_path = (
+        args.normalizer_out.resolve()
+        if args.normalizer_out is not None
+        else default_normalizer_path(out_dir)
+    )
+
+    print(f"   HDF5 input     : {args.hdf5.resolve()}")
+    print(f"   Output dir     : {out_dir.resolve()}")
+    print(f"   Normalizer out : {normalizer_path}")
 
     print("1. Building hyperparameter table...")
-    hp_df = build_hyperparam_table(args.hdf5, data_source=data_source)
+    hp_df = build_hyperparam_table(args.hdf5, data_source=data_source, workers=workers)
     hp_df.to_csv(hyperparam_csv, index=False)
     print(f"   Saved: {hyperparam_csv} ({len(hp_df)} rows)")
 
@@ -579,7 +860,13 @@ def main() -> None:
 
     print("3. Building event datasets...")
     all_events_df, all_detected_df = build_event_datasets(
-        encoded_df, args.hdf5, args.n_sample, args.n_det, data_source=data_source,
+        encoded_df,
+        args.hdf5,
+        args.n_sample,
+        args.n_det,
+        data_source=data_source,
+        workers=workers,
+        sample_seed=int(args.seed),
     )
     all_events_df.to_parquet(all_events_pq, index=False)
     all_detected_df.to_parquet(all_detected_pq, index=False)
@@ -593,8 +880,9 @@ def main() -> None:
     print(f"   Saved: {splits_json}")
 
     print("5. Computing observable normalization (from intrinsic all_events rows)...")
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    compute_and_save_obs_normalizer(all_events_df, OBS_NORMALIZER_JSON)
+    normalizer_path.parent.mkdir(parents=True, exist_ok=True)
+    compute_and_save_obs_normalizer(all_events_df, normalizer_path)
+    print(f"   Saved: {normalizer_path}")
 
     print("Done.")
 

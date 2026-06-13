@@ -4,7 +4,8 @@
 #SBATCH --error=logs/04_cfm.%j.err
 #SBATCH --partition=gpu-shared
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=10
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=10
 #SBATCH --gpus=1
 #SBATCH --mem=96G
 #SBATCH --time=24:00:00
@@ -32,6 +33,14 @@ module load gpu
 PYTHON="${PYTHON:-${PWD}/.venv311/bin/python}"
 [[ -x "$PYTHON" ]] || PYTHON="python"
 
+THREADS="${SLURM_CPUS_PER_TASK:-10}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$THREADS}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$THREADS}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-$THREADS}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-$THREADS}"
+echo "Using CPU worker threads: ${THREADS}"
+
 $PYTHON scripts/04_cfm_emulator.py \
     --steps 100000 \
-    --device cuda
+    --device cuda \
+    --workers "${THREADS}"

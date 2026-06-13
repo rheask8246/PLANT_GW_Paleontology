@@ -5,7 +5,8 @@ import sys
 from pathlib import Path
 
 ANALYSIS_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = ANALYSIS_DIR.parents[2]
+# scripts/analysis/ → parents[1] is PLANT_GW_Paleontology/
+PROJECT_ROOT = ANALYSIS_DIR.parents[1]
 
 
 def setup() -> Path:

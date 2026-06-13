@@ -30,18 +30,12 @@ data/bps_output.h5
 HYPERPARAMETER GRID (the "λ" training axes)
 ────────────────────────────────────────────────────────────────────────────────
 Primary grid axes (varied on a dense regular grid):
-    sfr_a  (aSF)  SFR Madau-Dickinson amplitude  [0.010, 0.030]   N_SFRA values
-    mu0           mean metallicity at z = 0       [0.010, 0.060]   N_MU0 values
+    sfr_a  (aSF)  SFR Madau-Dickinson amplitude  van Son ±1σ, >0 only   N_SFRA values
+    mu0           mean metallicity at z = 0       van Son ±1σ, >0 only   N_MU0 values
 
 Nuisance parameters (one random draw per grid point, stored as sspc_* columns).
-Ranges are centred on TNG100-1 best-fit values (Briel+):
-    sfr_b      [1.0,  3.0]   MD14 rising slope      (TNG100 best-fit ≈ 1.46)
-    sfr_c      [2.0,  6.0]   MD14 turnover redshift (TNG100 best-fit ≈ 4.51)
-    sfr_d      [4.0,  8.0]   MD14 falling slope     (TNG100 best-fit ≈ 6.21)
-    muz        [-0.5, 0.1]   metallicity evo. slope (TNG100 best-fit ≈ -0.052)
-    sigma0     [0.5,  1.5]   metallicity log-spread (TNG100 best-fit ≈ 1.15)
-    sigmaz     [-0.1, 0.1]   redshift evo. of spread(TNG100 best-fit ≈ 0.047)
-    alpha_skew [-2.0, 2.0]   log-skew-normal skewness(TNG100 best-fit ≈ -1.85)
+Ranges are van Son et al. (2022) Table 1 best-fit ± 1σ (DOI:10.3847/1538-4357/acbf51),
+clipped to physically valid values (see ``scripts/sspc_param_ranges.py``).
 
 ════════════════════════════════════════════════════════════════════════════════
 OUTPUTS
@@ -56,8 +50,10 @@ HDF5 key structure:
 Columns per key:
     mchirp              [Msun]   source-frame chirp mass
     q                   [—]      mass ratio m2/m1 ∈ (0,1]
-    z                   [—]      merger redshift (intrinsic-rate weighted); z=0 grid bin stored as max(z, Z_LOG_FLOOR)
+    z                   [—]      merger redshift (intrinsic p(z|binary) unless --fixed-z); z=0 stored as max(z, Z_LOG_FLOOR)
     weight              [—]      intrinsic merger rate weight (merger/yr/binary)
+    intrinsic_rate_yr   [yr⁻¹]   total intrinsic merger rate for this Λ (sum over all BPS binaries, pre-sampling)
+    rate_per_gpc3_yr    [Gpc⁻³ yr⁻¹]  intrinsic_rate_yr / V_comov(z ≤ MAX_REDSHIFT)
     sspc_sfr_a/b/c/d    [—]      Madau-Dickinson SFR parameters used
     sspc_mu0/muz/sigma0/sigmaz  [—] metallicity distribution parameters used
     sspc_alpha_skew     [—]      metallicity skewness parameter used
@@ -93,6 +89,7 @@ ensure_paths()
 
 import argparse
 import importlib.util
+import os
 import warnings
 from pathlib import Path
 from typing import Any, Callable, Dict, Tuple
@@ -169,25 +166,17 @@ OUT_PATH_DEFAULT = PROJECT_ROOT / "data" / "sspc" / "models_sspc.hdf5"
 CHANNEL_MAP: Dict[int, str] = {1: "SMT", 2: "CE", 3: "CHE", 4: "SMT"}
 CHANNEL_NAMES = ["CE", "CHE", "SMT"]
 
-# Primary hyperparameter grid ranges
-# Centred on TNG100-1 best-fit (sfr_a≈0.017, mu0≈0.025)
-SFRA_RANGE = (0.010, 0.030)   # Madau-Dickinson amplitude aSF [Msun/yr/Mpc³]
-MU0_RANGE  = (0.010, 0.060)   # mean metallicity at z=0
-
-# Nuisance parameter sampling ranges
-# Centred on / covering TNG100-1 best-fit values (Briel+ Table 1):
-#   sfr_a=0.0170, sfr_b=1.456, sfr_c=4.514, sfr_d=6.210
-#   mu0=0.0249, muz=-0.0519, sigma0(omega0)=1.151, sigmaz(omegaz)=0.0474
-#   alpha_skew(alpha0)=-1.854
-NUISANCE_RANGES = {
-    "sfr_b":      (1.0,   3.0),   # MD14 rising slope           (TNG ≈ 1.46)
-    "sfr_c":      (2.0,   6.0),   # MD14 turnover redshift       (TNG ≈ 4.51)
-    "sfr_d":      (4.0,   8.0),   # MD14 falling slope           (TNG ≈ 6.21)
-    "muz":        (-0.5,  0.1),   # metallicity evolution slope  (TNG ≈ -0.052)
-    "sigma0":     (0.5,   1.5),   # metallicity log-spread σ₀    (TNG ≈ 1.15)
-    "sigmaz":     (-0.1,  0.1),   # redshift evo. of spread      (TNG ≈ 0.047)
-    "alpha_skew": (-2.0,  2.0),   # log-skew-normal skewness     (TNG ≈ -1.85)
-}
+# van Son et al. (2022) TNG100 ranges — single source of truth in sspc_param_ranges.py
+from sspc_param_ranges import (  # noqa: E402
+    DEFAULT_N_MU0,
+    DEFAULT_N_SFRA,
+    MU0_RANGE,
+    NUISANCE_RANGES,
+    SFRA_RANGE,
+    TNG100_BEST_FIT_NUISANCE,
+    VAN_SON_BEST_FIT,
+    linspace_grid,
+)
 
 # Cosmological integration grid
 MAX_REDSHIFT  = 10.0   # integrate to z=10 (covers all significant SF history)
@@ -196,6 +185,16 @@ Z_FIRST_SF    = 10.0   # first star-formation redshift
 # z=0 stays on the integration grid (ages, comoving volumes, SFR(z_form) interp); do not
 # replace it with Z_LOG_FLOOR here — that floor is only for persisted merger z and log10(z).
 Z_LOG_FLOOR = 1e-6
+
+
+def configure_worker_threads(workers: int) -> int:
+    """Set common threaded-kernel env vars for reproducible CPU parallelism."""
+    w = max(1, int(workers))
+    os.environ["OMP_NUM_THREADS"] = str(w)
+    os.environ["MKL_NUM_THREADS"] = str(w)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(w)
+    os.environ["NUMEXPR_NUM_THREADS"] = str(w)
+    return w
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -405,6 +404,11 @@ def _mu0_key(mu0: float) -> str:
     return f"mu0{int(round(mu0 * 10_000)):04d}"
 
 
+def nuisance_tng100_params() -> Dict[str, float]:
+    """Fixed nuisance SSPC parameters from DOI:10.3847/1538-4357/acbf51."""
+    return dict(TNG100_BEST_FIT_NUISANCE)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # MAIN: GENERATE DATA
 # ═════════════════════════════════════════════════════════════════════════════
@@ -415,17 +419,59 @@ def main() -> None:
     )
     parser.add_argument("--bps-hdf5", type=Path, default=BPS_PATH_DEFAULT)
     parser.add_argument("--output-hdf5", type=Path, default=OUT_PATH_DEFAULT)
-    parser.add_argument("--n-sfra",   type=int, default=8)
-    parser.add_argument("--n-mu0",    type=int, default=8)
+    parser.add_argument("--n-sfra",   type=int, default=DEFAULT_N_SFRA)
+    parser.add_argument("--n-mu0",    type=int, default=DEFAULT_N_MU0)
     parser.add_argument("--n-events", type=int, default=50_000)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.environ.get("SLURM_CPUS_PER_TASK", "1")),
+        help="CPU worker threads for OMP/MKL/OpenBLAS/NumExpr (default: SLURM_CPUS_PER_TASK or 1).",
+    )
     parser.add_argument("--seed",     type=int, default=42)
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--fixed-nuisance-tng100",
+        action="store_true",
+        help=(
+            "Hold sfr_b,c,d, muz, sigma0, sigmaz, alpha_skew at fixed best-fit "
+            "values on every grid cell (only sfr_a and mu0 vary)."
+        ),
+    )
+    parser.add_argument(
+        "--fixed-nuisance-mid",
+        action="store_true",
+        help="Deprecated alias for --fixed-nuisance-tng100.",
+    )
+    parser.add_argument(
+        "--fixed-z",
+        type=float,
+        default=None,
+        metavar="Z",
+        help=(
+            "Assign every sampled event this merger redshift (no draw from p(z|binary)). "
+            f"Must lie in [0, {MAX_REDSHIFT}]. Cosmic weights still use the full z grid."
+        ),
+    )
+    parser.add_argument(
+        "--no-overwrite",
+        action="store_true",
+        help="Fail if output HDF5 already exists (default: overwrite).",
+    )
     args = parser.parse_args()
+    workers = configure_worker_threads(args.workers)
+
+    fixed_z: float | None = args.fixed_z
+    if fixed_z is not None:
+        if not (0.0 <= fixed_z <= MAX_REDSHIFT):
+            raise ValueError(
+                f"--fixed-z must be in [0, {MAX_REDSHIFT}], got {fixed_z}"
+            )
+        fixed_z = float(fixed_z)
 
     out = args.output_hdf5
     out.parent.mkdir(parents=True, exist_ok=True)
-    if out.exists() and not args.overwrite:
-        raise FileExistsError(f"{out} exists. Use --overwrite to replace.")
+    if out.exists() and args.no_overwrite:
+        raise FileExistsError(f"{out} exists. Omit --no-overwrite to replace.")
 
     rng = np.random.default_rng(args.seed)
 
@@ -441,20 +487,39 @@ def main() -> None:
     logZ_max = np.log(bps_full["metallicity"].max())
 
     # ── 3. Define parameter grid ────────────────────────────────────────────
-    sfra_vals = np.linspace(*SFRA_RANGE, args.n_sfra)
-    mu0_vals  = np.linspace(*MU0_RANGE,  args.n_mu0)
+    sfra_vals = linspace_grid("sfr_a", args.n_sfra)
+    mu0_vals = linspace_grid("mu0", args.n_mu0)
 
     print(f"\nSSPC grid: {args.n_sfra} × {args.n_mu0} = {args.n_sfra * args.n_mu0} "
           f"param sets × {len(CHANNEL_NAMES)} channels = "
           f"{args.n_sfra * args.n_mu0 * len(CHANNEL_NAMES)} grid points")
-    print(f"  sfr_a  : {sfra_vals[0]:.4f} – {sfra_vals[-1]:.4f}  (TNG100 best-fit ≈ 0.017)")
-    print(f"  mu0    : {mu0_vals[0]:.4f}  – {mu0_vals[-1]:.4f}  (TNG100 best-fit ≈ 0.025)")
+    print(f"  sfr_a  : [{SFRA_RANGE[0]:.6g}, {SFRA_RANGE[1]:.6g}]  "
+          f"(van Son best-fit {VAN_SON_BEST_FIT['sfr_a']})")
+    print(f"  mu0    : [{MU0_RANGE[0]:.6g}, {MU0_RANGE[1]:.6g}]  "
+          f"(van Son best-fit {VAN_SON_BEST_FIT['mu0']})")
     print(f"  events per grid point: {args.n_events:,}")
+    print(f"  worker threads: {workers}")
     print(f"  Sampling: INTRINSIC merger rate (no pdet weighting)")
-    print(f"  Redshift range: 0 – {MAX_REDSHIFT}")
-    print(f"  Nuisance parameter ranges (centred on TNG100-1 best-fit):")
-    for k, (lo, hi) in NUISANCE_RANGES.items():
-        print(f"    {k:15s}: [{lo}, {hi}]")
+    if fixed_z is not None:
+        z_store = max(fixed_z, Z_LOG_FLOOR)
+        print(f"  Event redshift: FIXED at z = {fixed_z:g} (stored as {z_store:g})")
+    else:
+        print(f"  Event redshift: drawn from intrinsic p(z|binary); grid 0 – {MAX_REDSHIFT}")
+    use_fixed_nuisance = args.fixed_nuisance_tng100 or args.fixed_nuisance_mid
+    if args.fixed_nuisance_mid and not args.fixed_nuisance_tng100:
+        warnings.warn(
+            "--fixed-nuisance-mid is deprecated; using fixed best-fit nuisances.",
+            stacklevel=2,
+        )
+    fixed_nuisance = nuisance_tng100_params() if use_fixed_nuisance else None
+    if fixed_nuisance:
+        print("  Nuisance parameters: FIXED at best-fit values (same on every cell):")
+        for k in sorted(fixed_nuisance):
+            print(f"    {k:15s}: {fixed_nuisance[k]:.6g}")
+    else:
+        print("  Nuisance parameter ranges (random draw per grid cell):")
+        for k, (lo, hi) in NUISANCE_RANGES.items():
+            print(f"    {k:15s}: [{lo}, {hi}]")
 
     # ── 4. Write output ──────────────────────────────────────────────────────
     n_written = 0
@@ -477,14 +542,22 @@ def main() -> None:
 
             for sfr_a in sfra_vals:
                 for mu0 in mu0_vals:
-                    # Sample nuisance parameters for this grid point
-                    sfr_b      = float(rng.uniform(*NUISANCE_RANGES["sfr_b"]))
-                    sfr_c      = float(rng.uniform(*NUISANCE_RANGES["sfr_c"]))
-                    sfr_d      = float(rng.uniform(*NUISANCE_RANGES["sfr_d"]))
-                    muz        = float(rng.uniform(*NUISANCE_RANGES["muz"]))
-                    sigma0     = float(rng.uniform(*NUISANCE_RANGES["sigma0"]))
-                    sigmaz     = float(rng.uniform(*NUISANCE_RANGES["sigmaz"]))
-                    alpha_skew = float(rng.uniform(*NUISANCE_RANGES["alpha_skew"]))
+                    if fixed_nuisance:
+                        sfr_b = fixed_nuisance["sfr_b"]
+                        sfr_c = fixed_nuisance["sfr_c"]
+                        sfr_d = fixed_nuisance["sfr_d"]
+                        muz = fixed_nuisance["muz"]
+                        sigma0 = fixed_nuisance["sigma0"]
+                        sigmaz = fixed_nuisance["sigmaz"]
+                        alpha_skew = fixed_nuisance["alpha_skew"]
+                    else:
+                        sfr_b = float(rng.uniform(*NUISANCE_RANGES["sfr_b"]))
+                        sfr_c = float(rng.uniform(*NUISANCE_RANGES["sfr_c"]))
+                        sfr_d = float(rng.uniform(*NUISANCE_RANGES["sfr_d"]))
+                        muz = float(rng.uniform(*NUISANCE_RANGES["muz"]))
+                        sigma0 = float(rng.uniform(*NUISANCE_RANGES["sigma0"]))
+                        sigmaz = float(rng.uniform(*NUISANCE_RANGES["sigmaz"]))
+                        alpha_skew = float(rng.uniform(*NUISANCE_RANGES["alpha_skew"]))
 
                     # ── SFR(z) ───────────────────────────────────────────────
                     sfr_z_vals = find_sfr(redshifts, sfr_a, sfr_b, sfr_c, sfr_d)
@@ -518,19 +591,31 @@ def main() -> None:
                     ev_idx = rng.choice(n_ch, size=args.n_events,
                                         replace=True, p=prob)
 
-                    # Draw merger redshift from intrinsic-rate distribution
-                    pz_ev  = pz[ev_idx].astype(np.float64)
-                    pz_ev /= pz_ev.sum(axis=1, keepdims=True) + 1e-30
-                    cum    = np.cumsum(pz_ev, axis=1)
-                    u_draw = rng.random(args.n_events)[:, np.newaxis]
-                    z_idx  = (cum < u_draw).sum(axis=1)
-                    z_idx  = np.clip(z_idx, 0, n_z - 1)
-                    z_ev   = np.maximum(redshifts[z_idx], Z_LOG_FLOOR).astype(np.float32)
+                    # Merger redshift: fixed value or draw from intrinsic-rate distribution
+                    if fixed_z is not None:
+                        z_ev = np.full(
+                            args.n_events,
+                            max(fixed_z, Z_LOG_FLOOR),
+                            dtype=np.float32,
+                        )
+                    else:
+                        pz_ev = pz[ev_idx].astype(np.float64)
+                        pz_ev /= pz_ev.sum(axis=1, keepdims=True) + 1e-30
+                        cum = np.cumsum(pz_ev, axis=1)
+                        u_draw = rng.random(args.n_events)[:, np.newaxis]
+                        z_idx = (cum < u_draw).sum(axis=1)
+                        z_idx = np.clip(z_idx, 0, n_z - 1)
+                        z_ev = np.maximum(redshifts[z_idx], Z_LOG_FLOOR).astype(
+                            np.float32
+                        )
 
                     # ── Observables ──────────────────────────────────────────
                     mchirp_ev = mchirp_bps[ev_idx]
                     q_ev      = q_bps[ev_idx]
                     weight_ev = weight[ev_idx].astype(np.float32)
+
+                    v_gpc3 = cosmology.comoving_volume(MAX_REDSHIFT).to(u.Gpc**3).value
+                    rate_per_gpc3_yr = float(total_rate / v_gpc3) if v_gpc3 > 0.0 else 0.0
 
                     # ── Assemble DataFrame ───────────────────────────────────
                     df_out = pd.DataFrame({
@@ -538,6 +623,8 @@ def main() -> None:
                         "q":               q_ev,
                         "z":               z_ev,
                         "weight":          weight_ev,
+                        "intrinsic_rate_yr": np.float64(total_rate),
+                        "rate_per_gpc3_yr": np.float64(rate_per_gpc3_yr),
                         "sspc_sfr_a":      np.float32(sfr_a),
                         "sspc_sfr_b":      np.float32(sfr_b),
                         "sspc_sfr_c":      np.float32(sfr_c),

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path as _Path
 
 _ANALYSIS_DIR = _Path(__file__).resolve().parent
-_PROJECT_ROOT = _ANALYSIS_DIR.parents[2]
+_PROJECT_ROOT = _ANALYSIS_DIR.parents[1]
 for _p in (_PROJECT_ROOT, _ANALYSIS_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))

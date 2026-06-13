@@ -2,8 +2,8 @@
 """
 Diffusion Emulator: DDPM for merger event generation.
 
-Mirrors 04_cfm_emulator.py structure. Same intrinsic `all_events` data, normalizer, validation.
-Outputs same plots to plots/04b_diffusion_emulator/<timestamp>/ for comparison.
+Mirrors 04_cfm_emulator.py structure. Same intrinsic `all_events` data and normalizer.
+Plots: scripts/analysis/04b_diffusion_emulator_plots.py (or slurm/04b_diffusion_emulator_plots.sh).
 """
 
 from __future__ import annotations
@@ -23,15 +23,14 @@ from plant_paths import (  # noqa: E402
     SPLITS_JSON,
     ensure_paths,
     ml_data_dir,
-    plot_run_dir,
 )
 
 ensure_paths()
 
 import argparse
 import json
+import os
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -47,6 +46,17 @@ N_BATCH = 256 if not SMOKE_TEST else 64
 STEPS = 100000 if not SMOKE_TEST else 500
 HIDDEN_DIM = 256 if not SMOKE_TEST else 128
 N_TIMESTEPS = 100
+
+
+def configure_worker_threads(workers: int) -> int:
+    """Set CPU thread workers for BLAS/OpenMP; useful for data path on GPU jobs."""
+    w = max(1, int(workers))
+    os.environ["OMP_NUM_THREADS"] = str(w)
+    os.environ["MKL_NUM_THREADS"] = str(w)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(w)
+    os.environ["NUMEXPR_NUM_THREADS"] = str(w)
+    torch.set_num_threads(w)
+    return w
 
 
 def _grid_rate_column(hp_df: pd.DataFrame) -> str:
@@ -86,6 +96,8 @@ def sample_events_from_grid(
     n: int,
     rng: np.random.Generator,
     z_jitter: bool = True,
+    *,
+    z_clip_max: float | None = None,
 ) -> np.ndarray:
     """Sample n events from grid_idx. Returns (n, 3) raw [mchirp,q,z]."""
     mask = events_df["grid_idx"] == grid_idx
@@ -97,8 +109,91 @@ def sample_events_from_grid(
         idx = rng.choice(len(sub), size=n, replace=True)
     x = sub.iloc[idx].values.astype(np.float32)
     if z_jitter:
-        x[:, 2] = np.clip(x[:, 2] + rng.uniform(-0.05, 0.05, size=n).astype(np.float32), 0.05, 1.55)
+        if z_clip_max is None:
+            z_clip_max = float(sub["z"].max()) if "z" in sub.columns and len(sub) else 10.0
+        x[:, 2] = np.clip(
+            x[:, 2] + rng.uniform(-0.05, 0.05, size=n).astype(np.float32),
+            1e-6,
+            float(z_clip_max),
+        )
     return x
+
+
+def _pack_events_by_grid(events_df: pd.DataFrame, *, n_grid: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Pack (mchirp,q,z) into one array + ptr offsets by grid_idx."""
+    grid = events_df["grid_idx"].values.astype(np.int64, copy=False)
+    order = np.argsort(grid, kind="mergesort")
+    grid_sorted = grid[order]
+    obs_sorted = events_df[["mchirp", "q", "z"]].values.astype(np.float32, copy=False)[order]
+    counts = np.bincount(grid_sorted.clip(min=0, max=n_grid - 1), minlength=n_grid).astype(
+        np.int64, copy=False
+    )
+    ptr = np.zeros(n_grid + 1, dtype=np.int64)
+    ptr[1:] = np.cumsum(counts)
+    return obs_sorted, ptr
+
+
+def sample_events_from_packed(
+    obs_sorted: np.ndarray,
+    ptr: np.ndarray,
+    grid_idx: int,
+    n: int,
+    rng: np.random.Generator,
+    *,
+    z_jitter: bool = True,
+    z_clip_max: float | None = None,
+) -> np.ndarray:
+    start = int(ptr[int(grid_idx)])
+    end = int(ptr[int(grid_idx) + 1])
+    m = end - start
+    if m <= 0:
+        return np.zeros((n, 3), dtype=np.float32)
+    if m >= n:
+        idx = start + rng.integers(0, m, size=n)
+    else:
+        idx = start + rng.choice(m, size=n, replace=True)
+    x = obs_sorted[idx].astype(np.float32, copy=False)
+    if z_jitter:
+        x = x.copy()
+        if z_clip_max is None:
+            z_clip_max = float(np.max(obs_sorted[:, 2])) if obs_sorted.size else 10.0
+        x[:, 2] = np.clip(
+            x[:, 2] + rng.uniform(-0.05, 0.05, size=n).astype(np.float32),
+            1e-6,
+            float(z_clip_max),
+        )
+    return x
+
+
+def _sample_events_any(
+    *,
+    obs_sorted: np.ndarray | None,
+    ptr: np.ndarray | None,
+    events_df: pd.DataFrame,
+    grid_idx: int,
+    n: int,
+    rng: np.random.Generator,
+    z_jitter: bool = True,
+    z_clip_max: float | None = None,
+) -> np.ndarray:
+    if obs_sorted is not None and ptr is not None:
+        return sample_events_from_packed(
+            obs_sorted,
+            ptr,
+            grid_idx,
+            n,
+            rng,
+            z_jitter=z_jitter,
+            z_clip_max=z_clip_max,
+        )
+    return sample_events_from_grid(
+        events_df,
+        grid_idx,
+        n,
+        rng,
+        z_jitter=z_jitter,
+        z_clip_max=z_clip_max,
+    )
 
 
 def _lambda_cols(df: pd.DataFrame) -> List[str]:
@@ -108,11 +203,52 @@ def _lambda_cols(df: pd.DataFrame) -> List[str]:
     )
 
 
+def _is_sspc_hyperparam_df(hp_df: pd.DataFrame) -> bool:
+    """Heuristic: SSPC grids have (sfra, mu0) columns; Zenodo has (chi_b, alpha_CE)."""
+    cols = set(hp_df.columns.astype(str))
+    return ("sfra" in cols) and ("mu0" in cols)
+
+
+def _histogram_kl(
+    x_true: np.ndarray,
+    x_model: np.ndarray,
+    *,
+    bins: int = 60,
+    eps: float = 1e-12,
+) -> float:
+    """
+    Discrete KL(true || model) using matched histogram bins.
+
+    Uses a small epsilon floor so empty bins don't produce inf/NaN.
+    """
+    xt = np.asarray(x_true, dtype=np.float64)
+    xm = np.asarray(x_model, dtype=np.float64)
+    xt = xt[np.isfinite(xt)]
+    xm = xm[np.isfinite(xm)]
+    if xt.size == 0 or xm.size == 0:
+        return float("nan")
+
+    lo = float(min(np.min(xt), np.min(xm)))
+    hi = float(max(np.max(xt), np.max(xm)))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return 0.0
+
+    h_t, edges = np.histogram(xt, bins=int(bins), range=(lo, hi), density=False)
+    h_m, _ = np.histogram(xm, bins=edges, density=False)
+    p = h_t.astype(np.float64) + float(eps)
+    q = h_m.astype(np.float64) + float(eps)
+    p = p / np.sum(p)
+    q = q / np.sum(q)
+    return float(np.sum(p * (np.log(p) - np.log(q))))
+
+
 def run_smoke_test(
     device: str = "cpu",
     steps: int = 500,
     output_checkpoint: Path | None = None,
     seed: int = 42,
+    *,
+    pack_events: bool = True,
 ) -> None:
     """Run smoke/full diffusion training and save checkpoint."""
     import sys
@@ -158,9 +294,17 @@ def run_smoke_test(
     n_grid = len(hp_df)
     p_uniform = 1.0 / n_grid
 
-    events_df = pd.read_parquet(events_pq)
+    events_df = pd.read_parquet(events_pq, columns=["mchirp", "q", "z", "grid_idx"])
     rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
+
+    obs_sorted = None
+    ptr = None
+    if pack_events:
+        print("   Packing events by grid_idx (faster sampling)...", flush=True)
+        obs_sorted, ptr = _pack_events_by_grid(events_df, n_grid=len(hp_df))
+        events_df = pd.DataFrame()
+    z_clip_max = float(np.max(obs_sorted[:, 2])) if obs_sorted is not None else float(events_df["z"].max())
 
     lambda_cols = _lambda_cols(hp_df)
     model = DiffusionEmulator(lambda_dim=len(lambda_cols), context_dim=128, hidden_dim=HIDDEN_DIM, n_timesteps=N_TIMESTEPS)
@@ -197,7 +341,15 @@ def run_smoke_test(
         importance_ratio = p_uniform / (w[i] + 1e-10)
         importance_ratio = min(importance_ratio, 3.0)
 
-        x1_raw = sample_events_from_grid(events_df, i, N_BATCH, rng)
+        x1_raw = _sample_events_any(
+            obs_sorted=obs_sorted,
+            ptr=ptr,
+            events_df=events_df,
+            grid_idx=i,
+            n=N_BATCH,
+            rng=rng,
+            z_clip_max=z_clip_max,
+        )
         x1_norm = normalize_obs(x1_raw, normalizer)
         x1 = torch.from_numpy(x1_norm).float().to(device)
         lam = torch.from_numpy(
@@ -237,7 +389,15 @@ def run_smoke_test(
             val_loss = 0.0
             with torch.no_grad():
                 for vi in val_idx[:3]:
-                    x1_raw = sample_events_from_grid(events_df, vi, 64, rng)
+                    x1_raw = _sample_events_any(
+                        obs_sorted=obs_sorted,
+                        ptr=ptr,
+                        events_df=events_df,
+                        grid_idx=vi,
+                        n=64,
+                        rng=rng,
+                        z_clip_max=z_clip_max,
+                    )
                     x1_norm = normalize_obs(x1_raw, normalizer)
                     x1 = torch.from_numpy(x1_norm).float().to(device)
                     lam_val = torch.from_numpy(
@@ -252,7 +412,15 @@ def run_smoke_test(
             val_losses.append((step + 1, val_loss))
             torch.manual_seed(42 + step)
             cat_kl = generate_catalog(lam_ce, 1000, model, normalizer)
-            true_kl = sample_events_from_grid(events_df, grid_idx_ce, 1000, rng)
+            true_kl = _sample_events_any(
+                obs_sorted=obs_sorted,
+                ptr=ptr,
+                events_df=events_df,
+                grid_idx=grid_idx_ce,
+                n=1000,
+                rng=rng,
+                z_clip_max=z_clip_max,
+            )
             mchirp_kl = _histogram_kl(true_kl[:, 0], cat_kl["mchirp"].values)
             q_kl = _histogram_kl(true_kl[:, 1], cat_kl["q"].values)
             z_kl = _histogram_kl(true_kl[:, 2], cat_kl["z"].values)
@@ -301,27 +469,6 @@ def run_smoke_test(
             all_pass = False
     print("=" * 60)
     print(f"All 6 checks passed: {all_pass}")
-    if not all_pass:
-        print("  (Continuing to extended validation plots...)")
-
-    run_extended_smoke_test_validation(
-        model=model,
-        normalizer=normalizer,
-        hp_df=hp_df,
-        events_df=events_df,
-        train_losses=train_losses,
-        val_losses=val_losses,
-        grad_norms=grad_norms,
-        loss_0=loss_0,
-        loss_500=loss_500,
-        work_dir=work_dir,
-        splits_path=splits_path,
-        device=device,
-        rng=rng,
-        steps=steps,
-        lambda_cols=lambda_cols,
-    )
-
     # Save final model checkpoint
     final_ckpt_dir = CHECKPOINT_DIR
     final_ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -339,557 +486,25 @@ def run_smoke_test(
     }, ckpt_path)
     print(f"\n  Saved final diffusion checkpoint to {ckpt_path}")
 
+    metrics_path = ckpt_path.parent / f"{ckpt_path.stem}_training_metrics.json"
+    with open(metrics_path, "w") as f:
+        json.dump(
+            {
+                "train_losses": train_losses,
+                "val_losses": val_losses,
+                "grad_norms": grad_norms,
+                "loss_0": loss_0,
+                "loss_final": loss_500,
+                "steps": steps,
+            },
+            f,
+            indent=2,
+        )
+    print(f"  Saved training metrics → {metrics_path}")
+    print("  Plots: python scripts/analysis/04b_diffusion_emulator_plots.py")
+
     if not all_pass:
         raise RuntimeError("Smoke test validation failed.")
-
-
-# =============================================================================
-# EXTENDED SMOKE TEST VALIDATION
-# =============================================================================
-
-CHI_B_RANGE = (0.0, 0.5)
-ALPHA_CE_RANGE = (0.2, 5.0)
-
-SSPC_SFRA_RANGE = (0.010, 0.030)
-SSPC_MU0_RANGE = (0.010, 0.060)
-
-
-def _is_sspc_hyperparam_df(hp_df: pd.DataFrame) -> bool:
-    return "sfra" in hp_df.columns
-
-
-def _sspc_interp_lambda(p1: float, p2: float, lam_template: np.ndarray) -> np.ndarray:
-    lam = np.array(lam_template, dtype=np.float32).copy()
-    s0, s1 = SSPC_SFRA_RANGE
-    m0, m1 = SSPC_MU0_RANGE
-    lam[3] = (p1 - s0) / (s1 - s0) if s1 > s0 else 0.0
-    lam[4] = (p2 - m0) / (m1 - m0) if m1 > m0 else 0.0
-    return lam
-
-
-def _ce_lambda_vec(
-    chi_b: float,
-    alpha_ce: float,
-    lambda_template: np.ndarray,
-    chi_range: Tuple[float, float],
-    alpha_range: Tuple[float, float],
-) -> np.ndarray:
-    chi_min, chi_max = chi_range
-    alpha_min, alpha_max = alpha_range
-    chi_norm = (chi_b - chi_min) / (chi_max - chi_min) if chi_max > chi_min else 0.0
-    alpha_norm = (alpha_ce - alpha_min) / (alpha_max - alpha_min) if alpha_max > alpha_min else 0.0
-    lam = np.array(lambda_template, dtype=np.float32).copy()
-    lam[0:5] = np.array([1.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
-    lam[5] = chi_norm
-    lam[6] = alpha_norm
-    return lam
-
-
-def _histogram_kl(x_true: np.ndarray, x_syn: np.ndarray, bins: int = 50) -> float:
-    lo = min(x_true.min(), x_syn.min())
-    hi = max(x_true.max(), x_syn.max())
-    if hi <= lo:
-        return 0.0
-    bin_edges = np.linspace(lo, hi, bins + 1)
-    p, _ = np.histogram(x_true, bins=bin_edges, density=True)
-    q, _ = np.histogram(x_syn, bins=bin_edges, density=True)
-    eps = 1e-10
-    p, q = p + eps, q + eps
-    p, q = p / p.sum(), q / q.sum()
-    from scipy.stats import entropy
-    return float(entropy(p, q))
-
-
-def _mmd_rbf(x: np.ndarray, y: np.ndarray, gamma: float = None) -> float:
-    if gamma is None:
-        xx = np.sum(x ** 2, axis=1, keepdims=True)
-        yy = np.sum(y ** 2, axis=1, keepdims=True)
-        xy = x @ y.T
-        dxx = xx + xx.T - 2 * xy
-        dyy = yy + yy.T - 2 * (y @ y.T)
-        dxy = xx + yy.T - 2 * xy
-        all_d = np.concatenate([dxx.ravel(), dyy.ravel(), dxy.ravel()])
-        gamma = 1.0 / (2 * np.median(all_d[all_d > 0]) + 1e-8)
-    n, m = len(x), len(y)
-    kxx = np.exp(-gamma * np.sum((x[:, None] - x[None, :]) ** 2, axis=2))
-    kyy = np.exp(-gamma * np.sum((y[:, None] - y[None, :]) ** 2, axis=2))
-    kxy = np.exp(-gamma * np.sum((x[:, None] - y[None, :]) ** 2, axis=2))
-    mmd2 = kxx.sum() / (n * n) + kyy.sum() / (m * m) - 2 * kxy.sum() / (n * m)
-    return max(0.0, mmd2) ** 0.5
-
-
-def run_extended_smoke_test_validation(
-    model,
-    normalizer: Dict,
-    hp_df: pd.DataFrame,
-    events_df: pd.DataFrame,
-    train_losses: List[float],
-    val_losses: List[Tuple[int, float]],
-    grad_norms: List[float],
-    loss_0: float,
-    loss_500: float,
-    work_dir: Path,
-    splits_path: Path,
-    device: torch.device,
-    rng: np.random.Generator,
-    steps: int = 500,
-    lambda_cols: List[str] = None,
-) -> None:
-    """Generate extended validation plots (same set as CFM)."""
-    import matplotlib.pyplot as plt
-    from scipy.stats import gaussian_kde, ks_2samp
-
-    import sys
-    ensure_paths()
-    from models.diffusion_emulator import normalize_obs, denormalize_obs, generate_catalog
-
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    plots_dir = plot_run_dir(Path(__file__), timestamp=timestamp)
-
-    obs_cols = ["mchirp", "q", "z"]
-    metrics: Dict[str, object] = {}
-
-    if lambda_cols is None:
-        lambda_cols = _lambda_cols(hp_df)
-
-    sspc_data = _is_sspc_hyperparam_df(hp_df)
-
-    if sspc_data:
-        for _ch in ["SMT", "CE", "CHE"]:
-            ch_rows = hp_df[hp_df["channel"] == _ch]
-            if len(ch_rows) > 0:
-                break
-        mid_p1 = float(np.median(ch_rows["sfra"]))
-        mid_p2 = float(np.median(ch_rows["mu0"]))
-        dists = (ch_rows["sfra"] - mid_p1).abs() + (ch_rows["mu0"] - mid_p2).abs()
-        grid_idx_ce = dists.idxmin()
-        row_repr = hp_df.loc[grid_idx_ce]
-        repr_label = (
-            f"{row_repr['channel']}/"
-            f"sfr_a={row_repr['sfra']:.4f}/"
-            f"mu0={row_repr['mu0']:.4f}"
-        )
-    else:
-        ce_match = hp_df[(hp_df["channel"] == "CE") & (hp_df["chi_b"] == 0.2) & (hp_df["alpha_CE"] == 1.0)]
-        if len(ce_match) == 0:
-            ce_match = hp_df[(hp_df["channel"] == "CE") & (hp_df["chi_b"] == 0.2)]
-        grid_idx_ce = ce_match.index[0] if len(ce_match) > 0 else 0
-        row_repr = hp_df.loc[grid_idx_ce]
-        repr_label = f"CE/chi_b={row_repr['chi_b']:.2f}/alpha_CE={row_repr['alpha_CE']:.2f}"
-
-    lam_ce = hp_df.loc[grid_idx_ce, lambda_cols].values.astype(np.float32)
-    if sspc_data:
-        chi_range = (float(hp_df["sfra"].min()), float(hp_df["sfra"].max()))
-        alpha_range = (float(hp_df["mu0"].min()), float(hp_df["mu0"].max()))
-    else:
-        ce_rows = hp_df[(hp_df["channel"] == "CE") & hp_df["alpha_CE"].notna()]
-        chi_range = (float(hp_df["chi_b"].min()), float(hp_df["chi_b"].max()))
-        if len(ce_rows) > 0:
-            alpha_range = (float(ce_rows["alpha_CE"].min()), float(ce_rows["alpha_CE"].max()))
-        else:
-            alpha_range = ALPHA_CE_RANGE
-
-    # -------------------------------------------------------------------------
-    # 1. TRAINING DYNAMICS
-    # -------------------------------------------------------------------------
-
-    pct_decrease = 100 * (loss_0 - loss_500) / loss_0 if loss_0 and loss_0 > 0 else 0
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(train_losses, color="C0", label="Train loss", alpha=0.8)
-    if val_losses:
-        steps_v, vals_v = zip(*val_losses)
-        ax.scatter(steps_v, vals_v, color="C1", s=30, label="Val loss", zorder=5)
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Loss (MSE on ε)")
-    ax.set_title(f"Loss decreased by {pct_decrease:.1f}% over {steps} steps")
-    ax.legend()
-    plt.tight_layout()
-    plt.savefig(plots_dir / "01a_loss_curves.png", dpi=300, bbox_inches="tight")
-    plt.close()
-    metrics["loss_reduction_pct"] = pct_decrease
-    metrics["final_train_loss"] = loss_500
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(grad_norms, color="C0", alpha=0.8)
-    ax.axhline(1e-6, color="red", ls="--", alpha=0.7, label="Vanishing threshold")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Gradient norm (DenoisingNet)")
-    ax.set_title("Gradient norms — check for explosion or vanishing")
-    ax.legend()
-    ax.set_yscale("log")
-    plt.tight_layout()
-    plt.savefig(plots_dir / "01b_gradient_norms.png", dpi=300, bbox_inches="tight")
-    plt.close()
-
-    # -------------------------------------------------------------------------
-    # 2. GENERATION QUALITY
-    # -------------------------------------------------------------------------
-
-    torch.manual_seed(43)
-    syn_1000 = generate_catalog(lam_ce, 1000, model, normalizer)
-    true_1000 = sample_events_from_grid(events_df, grid_idx_ce, 1000, rng)
-    true_1000_df = pd.DataFrame(true_1000, columns=obs_cols)
-
-    pairs = [("mchirp", "q"), ("mchirp", "z"), ("q", "z")]
-    for (c1, c2) in pairs:
-        fig, ax = plt.subplots(figsize=(6, 5))
-        ax.hist2d(true_1000_df[c1], true_1000_df[c2], bins=30, cmap="Blues", alpha=0.8, cmin=1)
-        try:
-            xy = np.vstack([syn_1000[c1].values, syn_1000[c2].values])
-            kde = gaussian_kde(xy)
-            xmin, xmax = true_1000_df[c1].min(), true_1000_df[c1].max()
-            ymin, ymax = true_1000_df[c2].min(), true_1000_df[c2].max()
-            xx = np.linspace(xmin, xmax, 50)
-            yy = np.linspace(ymin, ymax, 50)
-            X, Y = np.meshgrid(xx, yy)
-            Z = kde(np.vstack([X.ravel(), Y.ravel()])).reshape(X.shape)
-            ax.contour(X, Y, Z, levels=5, colors="red", alpha=0.5, linewidths=2)
-        except Exception:
-            ax.scatter(syn_1000[c1], syn_1000[c2], c="red", s=5, alpha=0.5)
-        ax.set_xlabel(c1)
-        ax.set_ylabel(c2)
-        ax.set_title(f"{repr_label}: True (blue) vs Synthetic (red)")
-        plt.tight_layout()
-        plt.savefig(plots_dir / f"02c_2d_{c1}_{c2}.png", dpi=300, bbox_inches="tight")
-        plt.close()
-
-    kl_vals = []
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    axes = axes.ravel()
-    for idx, col in enumerate(obs_cols):
-        ax = axes[idx]
-        x_true = true_1000_df[col].values
-        x_syn = syn_1000[col].values
-        try:
-            kde_true = gaussian_kde(x_true)
-            kde_syn = gaussian_kde(x_syn)
-            x_plot = np.linspace(min(x_true.min(), x_syn.min()), max(x_true.max(), x_syn.max()), 200)
-            ax.plot(x_plot, kde_true(x_plot), "b-", lw=2, label="True")
-            ax.plot(x_plot, kde_syn(x_plot), "r-", lw=2, label="Synthetic")
-            ax.axvline(np.mean(x_true), color="blue", ls=":", alpha=0.7)
-            ax.axvline(np.mean(x_syn), color="red", ls=":", alpha=0.7)
-        except Exception:
-            ax.hist(x_true, bins=30, density=True, alpha=0.5, color="blue", label="True")
-            ax.hist(x_syn, bins=30, density=True, alpha=0.5, color="red", label="Synthetic")
-        kl = _histogram_kl(x_true, x_syn)
-        kl_vals.append(kl)
-        ax.set_xlabel(col)
-        ax.set_ylabel("Density")
-        ax.set_title(f"{col} — KL = {kl:.3f}")
-        ax.legend()
-    plt.tight_layout()
-    plt.savefig(plots_dir / "02d_1d_marginals.png", dpi=300, bbox_inches="tight")
-    plt.close()
-    metrics["kl_mean"] = np.mean(kl_vals)
-    metrics["kl_max"] = np.max(kl_vals)
-
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    axes = axes.ravel()
-    for idx, col in enumerate(obs_cols):
-        ax = axes[idx]
-        x_true = np.sort(true_1000_df[col].values)
-        x_syn = np.sort(syn_1000[col].values)
-        n = min(len(x_true), len(x_syn))
-        q = np.linspace(0, 1, n, endpoint=False)
-        ax.plot(np.quantile(x_true, q), np.quantile(x_syn, q), "o", markersize=3, alpha=0.7)
-        lo = min(x_true.min(), x_syn.min())
-        hi = max(x_true.max(), x_syn.max())
-        ax.plot([lo, hi], [lo, hi], "k--", lw=2)
-        ax.set_xlabel(f"True {col} quantile")
-        ax.set_ylabel(f"Synthetic {col} quantile")
-        ax.set_title(f"Q-Q {col}")
-        ax.set_aspect("equal")
-    plt.tight_layout()
-    plt.savefig(plots_dir / "02e_qq_plots.png", dpi=300, bbox_inches="tight")
-    plt.close()
-
-    # -------------------------------------------------------------------------
-    # 3. INTERPOLATION
-    # -------------------------------------------------------------------------
-
-    if sspc_data:
-        p1_lo_b, p1_hi_b = chi_range
-        p1_vals_b = np.linspace(p1_lo_b, p1_hi_b, 3)
-        fixed_p2_b = float(np.median(hp_df["mu0"].dropna()))
-        scan_triples_b = [(p1, fixed_p2_b, f"sfr_a={p1:.4f}") for p1 in p1_vals_b]
-    else:
-        scan_triples_b = [(0.2, alpha, f"α={alpha}") for alpha in [0.2, 1.0, 3.0]]
-    colors = ["C0", "C1", "C2"]
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for (p1, p2, label), color in zip(scan_triples_b, colors):
-        if sspc_data:
-            lam = _sspc_interp_lambda(p1, p2, lam_ce)
-        else:
-            lam = _ce_lambda_vec(p1, p2, lam_ce, chi_range, alpha_range)
-        torch.manual_seed(44 + hash(label) % 100)
-        cat = generate_catalog(lam, 500, model, normalizer)
-        mean_mc = cat["mchirp"].mean()
-        ax.hist(cat["mchirp"], bins=30, alpha=0.5, color=color, label=f"{label} (μ={mean_mc:.1f})", density=True)
-    ax.set_xlabel("Chirp mass (Msun)")
-    ax.set_ylabel("Density")
-    ax.set_title("Does Diffusion interpolate smoothly in hyperparameter space?")
-    ax.legend()
-    plt.tight_layout()
-    plt.savefig(plots_dir / "03_interpolation.png", dpi=300, bbox_inches="tight")
-    plt.close()
-    metrics["ood_extrapolation_sane"] = "Y"
-
-    # -------------------------------------------------------------------------
-    # 4. COVERAGE
-    # -------------------------------------------------------------------------
-
-    train_idx = json.load(open(splits_path))["train"]
-    rand_grid = rng.choice(train_idx)
-    lam_rand = hp_df.iloc[rand_grid][lambda_cols].values.astype(np.float32)
-    torch.manual_seed(45)
-    syn_5000 = generate_catalog(lam_rand, 5000, model, normalizer)
-    true_5000 = sample_events_from_grid(events_df, rand_grid, 5000, rng)
-    true_5000_df = pd.DataFrame(true_5000, columns=obs_cols)
-
-    pairs_3 = [("mchirp", "q"), ("mchirp", "z"), ("q", "z")]
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    axes = axes.ravel()
-    for idx, (c1, c2) in enumerate(pairs_3):
-        ax = axes[idx]
-        ax.scatter(true_5000_df[c1], true_5000_df[c2], c="blue", s=5, alpha=0.3)
-        ax.scatter(syn_5000[c1], syn_5000[c2], c="red", s=5, alpha=0.3)
-        ax.set_xlabel(c1)
-        ax.set_ylabel(c2)
-    plt.suptitle("Coverage: True (blue) vs Synthetic (red)")
-    plt.tight_layout()
-    plt.savefig(plots_dir / "04a_coverage_scatter.png", dpi=300, bbox_inches="tight")
-    plt.close()
-
-    ks_vals = []
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    axes = axes.ravel()
-    for idx, col in enumerate(obs_cols):
-        ax = axes[idx]
-        x_true = np.sort(true_5000_df[col].values)
-        x_syn = np.sort(syn_5000[col].values)
-        ecdf_true = np.arange(1, len(x_true) + 1) / len(x_true)
-        ecdf_syn = np.arange(1, len(x_syn) + 1) / len(x_syn)
-        ax.plot(x_true, ecdf_true, "b-", lw=2, label="True")
-        ax.plot(x_syn, ecdf_syn, "r-", lw=2, label="Synthetic")
-        ks_stat, _ = ks_2samp(x_true, x_syn)
-        ks_vals.append(ks_stat)
-        ax.set_xlabel(col)
-        ax.set_ylabel("ECDF")
-        ax.set_title(f"{col} — KS = {ks_stat:.4f}")
-        ax.legend()
-    plt.tight_layout()
-    plt.savefig(plots_dir / "04b_ecdf_ks.png", dpi=300, bbox_inches="tight")
-    plt.close()
-    metrics["ks_mchirp"] = ks_vals[0]
-    metrics["ks_q"] = ks_vals[1]
-    metrics["ks_z"] = ks_vals[2]
-
-    # -------------------------------------------------------------------------
-    # 5. FAILURE MODE CHECKS
-    # -------------------------------------------------------------------------
-
-    rcol = _grid_rate_column(hp_df)
-    sorted_idx = np.argsort(hp_df[rcol].values)[:3]
-    any_nan = False
-    any_invalid = False
-    for gi in sorted_idx:
-        lam_hard = hp_df.iloc[gi][lambda_cols].values.astype(np.float32)
-        torch.manual_seed(46 + gi)
-        cat = generate_catalog(lam_hard, 100, model, normalizer)
-        if cat.isna().any().any():
-            any_nan = True
-        if (cat["q"] > 1).any() or (cat["z"] < 0).any():
-            any_invalid = True
-    metrics["any_nans"] = "Y" if any_nan else "N"
-    metrics["extreme_robust"] = not any_invalid
-
-    torch.manual_seed(47)
-    run1 = generate_catalog(lam_ce, 1000, model, normalizer)[obs_cols].values
-    torch.manual_seed(48)
-    run2 = generate_catalog(lam_ce, 1000, model, normalizer)[obs_cols].values
-    torch.manual_seed(49)
-    run3 = generate_catalog(lam_ce, 1000, model, normalizer)[obs_cols].values
-    mmd_12 = _mmd_rbf(run1, run2)
-    mmd_13 = _mmd_rbf(run1, run3)
-    mmd_23 = _mmd_rbf(run2, run3)
-    mmd_true_syn = _mmd_rbf(true_1000, run1)
-    mmd_variance = np.mean([mmd_12, mmd_13, mmd_23])
-    metrics["mmd_variance"] = mmd_variance
-    print(f"  Run 1 vs Run 2 MMD = {mmd_12:.4f}, Run 1 vs Run 3 MMD = {mmd_13:.4f}, True vs Synthetic MMD = {mmd_true_syn:.4f}")
-
-    # -------------------------------------------------------------------------
-    # 6. DENOISING DIRECTION (replaces vector field for diffusion)
-    # -------------------------------------------------------------------------
-
-    true_norm = normalize_obs(true_1000, normalizer)
-    mean_z = float(np.mean(true_norm[:, 2]))
-    log_mchirp_vals = true_norm[:, 0]
-    q_vals = true_norm[:, 1]
-    log_mc_grid = np.linspace(log_mchirp_vals.min(), log_mchirp_vals.max(), 20)
-    q_grid = np.linspace(q_vals.min(), q_vals.max(), 20)
-    LogMc, Qg = np.meshgrid(log_mc_grid, q_grid)
-    lam_t = torch.from_numpy(lam_ce).float().unsqueeze(0).to(device)
-    t_step = N_TIMESTEPS // 2  # t ≈ 0.5
-    t_norm = t_step / max(1, N_TIMESTEPS - 1)
-    eps_x_list, eps_y_list = [], []
-    model.eval()
-    with torch.no_grad():
-        for i in range(20):
-            for j in range(20):
-                x_3d = torch.tensor(
-                    [[LogMc[i, j], Qg[i, j], mean_z]],
-                    dtype=torch.float32,
-                    device=device,
-                )
-                t_t = torch.full((1, 1), t_norm, device=device)
-                context = model._encode_context(lam_t, x_3d)
-                eps = model.denoise(x_3d, t_t, context)
-                eps_x_list.append(-eps[0, 0].cpu().item())
-                eps_y_list.append(-eps[0, 1].cpu().item())
-    eps_x = np.array(eps_x_list).reshape(20, 20)
-    eps_y = np.array(eps_y_list).reshape(20, 20)
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.quiver(LogMc, Qg, eps_x, eps_y, alpha=0.7)
-    ax.scatter(true_norm[:, 0], true_norm[:, 1], c="red", s=5, alpha=0.5, label="True (t=1)")
-    x0_sample = np.random.randn(500, 3)
-    ax.scatter(x0_sample[:, 0], x0_sample[:, 1], c="lightblue", s=5, alpha=0.5, label="Noise (t=0)")
-    ax.set_xlabel("log10(mchirp) norm")
-    ax.set_ylabel("q norm")
-    ax.set_title(f"Denoising direction (-ε) at t≈0.5 ({repr_label})")
-    ax.legend()
-    plt.tight_layout()
-    plt.savefig(plots_dir / "06_denoising_direction.png", dpi=300, bbox_inches="tight")
-    plt.close()
-    model.train()
-
-    # -------------------------------------------------------------------------
-    # 7. SUMMARY
-    # -------------------------------------------------------------------------
-
-    pass_loss_reduction = metrics["loss_reduction_pct"] > 0
-    pass_final_loss = metrics["final_train_loss"] < 0.5
-    pass_kl_mean = metrics["kl_mean"] < 1.0
-    pass_kl_max = metrics["kl_max"] < 2.0
-    pass_ks_mchirp = metrics["ks_mchirp"] < 0.1
-    pass_ks_q = metrics["ks_q"] < 0.1
-    pass_mmd = metrics["mmd_variance"] > 0.01
-    pass_ood = metrics["ood_extrapolation_sane"] == "Y"
-    pass_nans = metrics["any_nans"] == "N"
-    n_pass = sum([pass_loss_reduction, pass_final_loss, pass_kl_mean, pass_kl_max,
-                  pass_ks_mchirp, pass_ks_q, pass_mmd, pass_ood, pass_nans])
-    overall_pass = n_pass >= 7
-
-    summary_lines = [
-        "# Diffusion Smoke Test Validation Summary",
-        "",
-        "| Metric | Value | Pass? |",
-        "|--------|-------|-------|",
-        f"| Loss reduction (%) | {metrics['loss_reduction_pct']:.1f} | {'✓' if pass_loss_reduction else '✗'} |",
-        f"| Final train loss | {metrics['final_train_loss']:.4f} | {'✓' if pass_final_loss else '✗'} |",
-        f"| Mean KL divergence (3 obs) | {metrics['kl_mean']:.4f} | {'✓' if pass_kl_mean else '✗'} |",
-        f"| Max KL divergence | {metrics['kl_max']:.4f} | {'✓' if pass_kl_max else '✗'} |",
-        f"| KS stat mchirp | {metrics['ks_mchirp']:.4f} | {'✓' if pass_ks_mchirp else '✗'} |",
-        f"| KS stat q | {metrics['ks_q']:.4f} | {'✓' if pass_ks_q else '✗'} |",
-        f"| Mode collapse MMD variance | {metrics['mmd_variance']:.4f} | {'✓' if pass_mmd else '✗'} |",
-        f"| OOD extrapolation sane? | {metrics['ood_extrapolation_sane']} | {'✓' if pass_ood else '✗'} |",
-        f"| Any NaNs generated? | {metrics['any_nans']} | {'✓' if pass_nans else '✗'} |",
-        "",
-        f"**Overall: {'PASS' if overall_pass else 'FAIL'}** ({n_pass}/9 metrics pass)",
-    ]
-    (plots_dir / "summary.md").write_text("\n".join(summary_lines), encoding="utf-8")
-
-    # -------------------------------------------------------------------------
-    # 8. SUMMARY IMAGE
-    # -------------------------------------------------------------------------
-
-    fig, axes = plt.subplots(3, 3, figsize=(12, 12))
-    ax = axes[0, 0]
-    ax.plot(train_losses, color="C0", alpha=0.8)
-    if val_losses:
-        steps_v, vals_v = zip(*val_losses)
-        ax.scatter(steps_v, vals_v, color="C1", s=20)
-    ax.set_title("Loss curves")
-    ax.set_xlabel("Step")
-    ax = axes[0, 1]
-    ax.plot(grad_norms, color="C0", alpha=0.8)
-    ax.set_yscale("log")
-    ax.set_title("Gradient norms")
-    ax.set_xlabel("Step")
-    ax = axes[0, 2]
-    ax.hist2d(true_1000_df["mchirp"], true_1000_df["q"], bins=20, cmap="Blues", alpha=0.8, cmin=1)
-    try:
-        xy = np.vstack([syn_1000["mchirp"].values, syn_1000["q"].values])
-        kde = gaussian_kde(xy)
-        xx = np.linspace(true_1000_df["mchirp"].min(), true_1000_df["mchirp"].max(), 40)
-        yy = np.linspace(true_1000_df["q"].min(), true_1000_df["q"].max(), 40)
-        X, Y = np.meshgrid(xx, yy)
-        Z = kde(np.vstack([X.ravel(), Y.ravel()])).reshape(X.shape)
-        ax.contour(X, Y, Z, levels=4, colors="red", alpha=0.6)
-    except Exception:
-        ax.scatter(syn_1000["mchirp"], syn_1000["q"], c="red", s=3, alpha=0.5)
-    ax.set_title("2D mchirp-q")
-    for col_idx, col in enumerate(["mchirp", "q"]):
-        ax = axes[1, col_idx]
-        x_true = true_1000_df[col].values
-        x_syn = syn_1000[col].values
-        try:
-            kde_true = gaussian_kde(x_true)
-            kde_syn = gaussian_kde(x_syn)
-            x_plot = np.linspace(min(x_true.min(), x_syn.min()), max(x_true.max(), x_syn.max()), 150)
-            ax.plot(x_plot, kde_true(x_plot), "b-", lw=1.5)
-            ax.plot(x_plot, kde_syn(x_plot), "r-", lw=1.5)
-        except Exception:
-            ax.hist(x_true, bins=25, density=True, alpha=0.5, color="blue")
-            ax.hist(x_syn, bins=25, density=True, alpha=0.5, color="red")
-        ax.set_title(f"{col} (KL={_histogram_kl(x_true, x_syn):.2f})")
-    ax = axes[1, 2]
-    x_true = np.sort(true_1000_df["mchirp"].values)
-    x_syn = np.sort(syn_1000["mchirp"].values)
-    n = min(len(x_true), len(x_syn))
-    q = np.linspace(0, 1, n, endpoint=False)
-    ax.plot(np.quantile(x_true, q), np.quantile(x_syn, q), "o", markersize=2, alpha=0.7)
-    lo, hi = x_true.min(), x_true.max()
-    ax.plot([lo, hi], [lo, hi], "k--", lw=1)
-    ax.set_title("Q-Q mchirp")
-    ax.set_aspect("equal")
-    ax = axes[2, 0]
-    if sspc_data:
-        p1_lo_c, p1_hi_c = chi_range
-        p1_vals_c = np.linspace(p1_lo_c, p1_hi_c, 3)
-        fixed_p2_c = float(np.median(hp_df["mu0"].dropna()))
-        dash_triples_b = [(p1, fixed_p2_c, f"sfr_a={p1:.4f}") for p1 in p1_vals_c]
-    else:
-        dash_triples_b = [(0.2, alpha, f"α={alpha}") for alpha in [0.2, 1.0, 3.0]]
-    for (p1, p2, label), color in zip(dash_triples_b, ["C0", "C1", "C2"]):
-        if sspc_data:
-            lam = _sspc_interp_lambda(p1, p2, lam_ce)
-        else:
-            lam = _ce_lambda_vec(p1, p2, lam_ce, chi_range, alpha_range)
-        torch.manual_seed(50 + hash(label) % 100)
-        cat = generate_catalog(lam, 500, model, normalizer)
-        ax.hist(cat["mchirp"], bins=25, alpha=0.5, color=color, label=f"{label} μ={cat['mchirp'].mean():.0f}", density=True)
-    ax.set_title("Interpolation")
-    ax.legend(fontsize=7)
-    ax = axes[2, 1]
-    for col, color in [("mchirp", "blue"), ("q", "red")]:
-        x = np.sort(true_5000_df[col].values)
-        ecdf = np.arange(1, len(x) + 1) / len(x)
-        ax.plot(x, ecdf, color=color, lw=1, alpha=0.7)
-        x2 = np.sort(syn_5000[col].values)
-        ecdf2 = np.arange(1, len(x2) + 1) / len(x2)
-        ax.plot(x2, ecdf2, color=color, ls="--", lw=1, alpha=0.7)
-    ax.set_title("ECDF (mchirp, q)")
-    ax = axes[2, 2]
-    ax.axis("off")
-    ax.text(0.1, 0.9, f"Loss ↓ {metrics['loss_reduction_pct']:.1f}%", fontsize=10)
-    ax.text(0.1, 0.75, f"KL mean: {metrics['kl_mean']:.3f}", fontsize=10)
-    ax.text(0.1, 0.6, f"MMD var: {metrics['mmd_variance']:.4f}", fontsize=10)
-    ax.text(0.1, 0.45, f"Overall: {'PASS' if overall_pass else 'FAIL'} ({n_pass}/9)", fontsize=12, fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(plots_dir / "smoke_test_summary.png", dpi=300, bbox_inches="tight")
-    plt.close()
-
-    print(f"  Saved all plots to {plots_dir}")
 
 
 def run_full_training(
@@ -924,11 +539,24 @@ def main() -> None:
         default=None,
         help="Path for diffusion_final.pt (default: checkpoints/diffusion_final.pt).",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.environ.get("SLURM_CPUS_PER_TASK", "1")),
+        help="CPU worker threads for BLAS/OpenMP (default: SLURM_CPUS_PER_TASK or 1).",
+    )
+    parser.add_argument(
+        "--no-pack-events",
+        action="store_true",
+        help="Disable packing events by grid_idx (uses slower per-step pandas filtering).",
+    )
     parser.add_argument("--seed", type=int, default=42, help="RNG for numpy/torch and training.")
     args = parser.parse_args()
 
     global SMOKE_TEST
     SMOKE_TEST = args.smoke_test
+    workers = configure_worker_threads(args.workers)
+    print(f"Using worker threads: {workers}")
 
     start = time.perf_counter()
     if SMOKE_TEST:
@@ -937,6 +565,7 @@ def main() -> None:
             steps=args.steps,
             output_checkpoint=args.output_checkpoint,
             seed=args.seed,
+            pack_events=not bool(args.no_pack_events),
         )
         elapsed = time.perf_counter() - start
         print(f"\nDiffusion smoke test completed in {elapsed:.1f}s ({elapsed/60:.1f} min)")

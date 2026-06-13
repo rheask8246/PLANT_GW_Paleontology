@@ -65,6 +65,7 @@ from torch.utils.data import DataLoader, Dataset
 HYPERPARAM_CSV = HYPERPARAM_TABLE_ENCODED_CSV
 DEFAULT_CFM_CKPT = CHECKPOINT_DIR / "cfm_final.pt"
 DEFAULT_DIFF_CKPT = CHECKPOINT_DIR / "diffusion_final.pt"
+DEFAULT_NB_CKPT = CHECKPOINT_DIR / "naive_bayes_final.pt"
 
 SSPC_THETA_PARAM_COLS = [
     "sspc_sfr_a_mean",
@@ -130,7 +131,7 @@ def load_frozen_emulator(
     if not ckpt_path.is_file():
         print(
             f"ERROR: emulator checkpoint not found: {ckpt_path}\n"
-            f"Train the generative model first: python 04_cfm_emulator.py ... or 04b_diffusion_emulator.py",
+            f"Train/fit the generative model first: 04_cfm_emulator.py, 04b_diffusion_emulator.py, or 04c_naive_bayes_emulator.py",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -153,8 +154,17 @@ def load_frozen_emulator(
             hidden_dim=hdim,
             n_timesteps=nt,
         )
+        m.load_state_dict(ck["model_state"], strict=True)
+    elif kind == "naive_bayes":
+        from models.naive_bayes_emulator import load_from_checkpoint
+
+        m, lambda_cols, nrm = load_from_checkpoint(ck, device=device)
+        m.eval()
+        for p in m.parameters():
+            p.requires_grad = False
+        return m, lambda_cols, nrm
     else:
-        sys.exit(f"ERROR: --emulator must be cfm or diffusion, got {kind!r}.")
+        sys.exit(f"ERROR: --emulator must be cfm, diffusion, or naive_bayes, got {kind!r}.")
     m.load_state_dict(ck["model_state"], strict=True)
     m.to(device)
     m.eval()
@@ -168,8 +178,12 @@ def _generate_dataframe(
 ) -> pd.DataFrame:
     if kind == "cfm":
         from models.cfm_emulator import generate_catalog
-    else:
+    elif kind == "diffusion":
         from models.diffusion_emulator import generate_catalog
+    elif kind == "naive_bayes":
+        from models.naive_bayes_emulator import generate_catalog
+    else:
+        raise ValueError(f"Unknown emulator kind {kind!r}")
     return generate_catalog(
         np.asarray(lambda_vec, dtype=np.float32), n_events, emulator, nrm
     )
@@ -309,8 +323,8 @@ def main() -> None:
         "--emulator",
         type=str,
         default="cfm",
-        choices=("cfm", "diffusion"),
-        help="Which generative model (Step 04 or 04b) produced the training path.",
+        choices=("cfm", "diffusion", "naive_bayes"),
+        help="Which generative model (Step 04, 04b, or 04c baseline) produced the training path.",
     )
     parser.add_argument(
         "--emulator-checkpoint",
@@ -373,9 +387,13 @@ def main() -> None:
 
     emu_path = args.emulator_checkpoint
     if emu_path is None:
-        emu_path = _resolve(
-            DEFAULT_CFM_CKPT if args.emulator == "cfm" else DEFAULT_DIFF_CKPT, PROJECT_ROOT
-        )
+        if args.emulator == "cfm":
+            default_ckpt = DEFAULT_CFM_CKPT
+        elif args.emulator == "diffusion":
+            default_ckpt = DEFAULT_DIFF_CKPT
+        else:
+            default_ckpt = DEFAULT_NB_CKPT
+        emu_path = _resolve(default_ckpt, PROJECT_ROOT)
     else:
         emu_path = _resolve(emu_path, PROJECT_ROOT)
 

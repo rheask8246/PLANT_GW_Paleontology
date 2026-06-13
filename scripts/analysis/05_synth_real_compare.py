@@ -22,7 +22,7 @@ merger tables with source-frame masses and redshift).
 **Synthetic arm (default):** sample a merger catalog from the **CFM or diffusion emulator**
 at a row of ``hyperparam_table_encoded.csv``. If ``--synthetic-grid-idx`` is omitted, the
 row is resolved from ``--synthetic-hyperparam-key`` (default: **SMT** cell nearest the
-TNG100-1 SSPC reference in ``00_sspc_data_generation.py``, ``/SMT/sfra0157/mu00243``).
+Step-00 best-fit reference in ``00_sspc_data_generation.py``, ``/SMT/sfra-097/mu00199``).
 Optional ``--synthetic-csv`` overrides with a hand-written table (e.g. repo
 ``data/gwtc_sample_events.csv`` is only a tiny smoke-test placeholder, not tied to a Λ row).
 
@@ -42,7 +42,7 @@ import sys
 from pathlib import Path as _Path
 
 _ANALYSIS_DIR = _Path(__file__).resolve().parent
-_PROJECT_ROOT = _ANALYSIS_DIR.parents[2]
+_PROJECT_ROOT = _ANALYSIS_DIR.parents[1]
 for _p in (_PROJECT_ROOT, _ANALYSIS_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
@@ -77,9 +77,9 @@ _05 = load_posterior_network_module()
 build_events_6d = _05.build_events_6d
 load_frozen_emulator = _05.load_frozen_emulator
 
-# Default emulator row: SMT channel, SSPC grid corner closest to TNG100-1 best-fit
-# (sfr_a ≈ 0.017, μ₀ ≈ 0.025) on the 8×8 linspace grid — see 00_sspc_data_generation.py.
-_DEFAULT_SMT_TNG_CENTER_KEY = "/SMT/sfra0157/mu00243"
+# Default emulator row: SMT channel, SSPC grid corner closest to Step-00 best-fit
+# (sfr_a = -0.020, mu0 = 0.025) on the 8×8 linspace grid — see 00_sspc_data_generation.py.
+_DEFAULT_SMT_TNG_CENTER_KEY = "/SMT/sfra-097/mu00199"
 
 # Column aliases: first match wins (case-insensitive keys in CSV)
 _COL_M1 = ("m1", "mass_1", "mass1", "mass_1_source", "m1_source")
@@ -158,6 +158,8 @@ def _generate_catalog(emulator: str, lambda_vec: np.ndarray, n_events: int, mode
         from models.cfm_emulator import generate_catalog as gc
     elif emulator == "diffusion":
         from models.diffusion_emulator import generate_catalog as gc
+    elif emulator == "naive_bayes":
+        from models.naive_bayes_emulator import generate_catalog as gc
     else:
         raise ValueError(f"Unknown emulator {emulator!r}")
     return gc(np.asarray(lambda_vec, dtype=np.float32), int(n_events), model, normalizer)
@@ -377,7 +379,7 @@ def main() -> None:
     )
     p.add_argument("--checkpoint-dir", type=Path, default=CHECKPOINT_DIR)
     p.add_argument("--model", type=str, default="full", choices=("lite", "full"))
-    p.add_argument("--emulator", type=str, default="cfm", choices=("cfm", "diffusion"))
+    p.add_argument("--emulator", type=str, default="cfm", choices=("cfm", "diffusion", "naive_bayes"))
     p.add_argument("--emulator-checkpoint", type=Path, default=None)
     p.add_argument("--output-dir", type=Path, default=None)
     p.add_argument("--num-samples", type=int, default=2000)
@@ -396,9 +398,12 @@ def main() -> None:
 
     emu_path = args.emulator_checkpoint
     if emu_path is None:
-        emu_path = CHECKPOINT_DIR / (
-            "cfm_final.pt" if args.emulator == "cfm" else "diffusion_final.pt"
-        )
+        _ckpt_names = {
+            "cfm": "cfm_final.pt",
+            "diffusion": "diffusion_final.pt",
+            "naive_bayes": "naive_bayes_final.pt",
+        }
+        emu_path = CHECKPOINT_DIR / _ckpt_names[args.emulator]
     emu_path = Path(emu_path).resolve()
     ckpt_dir = Path(args.checkpoint_dir).resolve()
 

@@ -36,6 +36,7 @@ This repository is a **software pipeline** that helps scientists ask: *When pair
 | **SSPC** | A particular way in this project to build **synthetic** merger populations by folding stellar-population models over cosmic time (see Step 00). |
 | **Intrinsic vs detection-weighted** | *Intrinsic* = full merger distribution weighted by the physical **merger rate** (no LIGO selection). *Detection-weighted* = an optional alternate view (e.g. Zenodo) where columns may include `pdet`; **this pipeline’s main SSPC path trains on the intrinsic view only.** |
 | **Emulator (Step 04 *or* 04b)** | A **required** fast **surrogate** (you train one architecture): “given Λ, draw merger-like **fingerprints**.” Step 05 is trained on **batches of those draws** (emulator **frozen**), not on a separate re-read of the 02 parquets. |
+| **Naive Bayes emulator (Step 04c)** | **Optional** non-neural **baseline**: fits per-grid statistics from Step 02 in seconds on CPU; same Λ → (mchirp, q, z) API. Use to benchmark CFM/diffusion—not the default production path before Step 05. |
 | **Posterior / inverse model (Step 05)** | “**Given a bag of events**, what Λ is plausible?”—trained to invert the *emulator’s* forward map, in line with the proposal’s **Stage 2 → Stage 4** order (CFM or diffusion first, then transformer + flow). |
 | **Neural network / “MLP”** | A flexible function approximator; here used for regression, generation, and inverse inference. |
 | **Parquet, HDF5, JSON** | Just **file containers** for tables or hierarchical data; you can ignore the format as long as the scripts that expect them are run in order. |
@@ -44,7 +45,7 @@ This repository is a **software pipeline** that helps scientists ask: *When pair
 
 ### One-sentence summary of the technical stack (for specialists)
 
-**Technical:** end-to-end SSPC **population** pipeline: MLP for per-grid **intrinsic merger-rate** totals; a **required** generative **emulator** (train **either** the CFM in Step 04 **or** the diffusion in Step 04b) for *p*(observables | Λ) under the same intrinsic sampling as 02; then a **set-transformer + flow** **amortized posterior** in Step 05 for *p*(Λ | catalog), where training catalogs are **synthetic samples from that emulator** (frozen), matching the proposal’s generative-then-inference ordering—not parallel shortcuts.
+**Technical:** end-to-end SSPC **population** pipeline: MLP for per-grid **intrinsic merger-rate** totals; a **required** generative **emulator** (train **either** the CFM in Step 04 **or** the diffusion in Step 04b) for *p*(observables | Λ) under the same intrinsic sampling as 02; an **optional** Step **04c** Naive Bayes baseline (no gradient training) for comparison; then a **set-transformer + flow** **amortized posterior** in Step 05 for *p*(Λ | catalog), where training catalogs are **synthetic samples from that emulator** (frozen), matching the proposal’s generative-then-inference ordering—not parallel shortcuts.
 
 ---
 
@@ -151,6 +152,9 @@ sbatch slurm/03_rate_network.sh
 sbatch slurm/04_cfm.sh
 # sbatch slurm/04b_diffusion.sh   # only if Step 05 will use --emulator diffusion (edit 05 script accordingly)
 
+# Step 04c — optional Naive Bayes baseline (CPU, ~minutes; for CFM/diffusion comparison)
+# sbatch slurm/04c_naive_bayes.sh
+
 # Step 05 — posterior network, FullPosteriorNet on GPU (after cfm_final.pt or diffusion_final.pt exists)
 sbatch slurm/05_posterior_network.sh
 ```
@@ -163,8 +167,17 @@ These use the **same** full checkpoints produced above (e.g. `checkpoints/cfm_fi
 # Intrinsic data QA on full parquets (after 02)
 sbatch slurm/02b_data_validation.sh
 
-# (sfr_a, mu0) merger-rate / count heatmaps per channel (after 02)
+# (sfr_a, mu0) merger-rate heatmaps (Step 00 HDF5; optional linear / averaged axes)
 sbatch slurm/00_grid_rate_heatmaps.sh
+# Fixed-nuisance HDF5 + linear scale:
+# SSPC_HDF5=data/sspc/models_sspc_fixed_nuisance.hdf5 EXTRA='--color-scale linear' sbatch slurm/00_grid_rate_heatmaps.sh
+
+# Intrinsic R(z) curves (recompute cosmic integration; TNG100-fixed nuisances)
+VARY=sfra sbatch slurm/00_rate_vs_redshift.sh
+# VARY=mu0 EXTRA='--log-y' sbatch slurm/00_rate_vs_redshift.sh
+
+# Step 00 with TNG100-fixed nuisances (custom output name):
+# SSPC_EXTRA='--fixed-nuisance-tng100 --output-hdf5 data/sspc/models_sspc_fixed_nuisance.hdf5' sbatch slurm/00_data_gen.sh
 
 # Figure 5–style distribution panels + merger-rate vs z (optional TNG paths in script / CLI)
 sbatch slurm/06a_distribution_analysis.sh
@@ -217,13 +230,20 @@ Use `squeue -u $USER` to monitor jobs. Logs go to `logs/`.
 | 03 | Rate network | shared | 4 | — | 16 GB | 1 h |
 | 04 | CFM emulator | gpu-shared | 10 | 1×V100 | 96 GB | 24 h |
 | 04b | Diffusion emulator | gpu-shared | 10 | 1×V100 | 96 GB | 24 h |
+| 04c | Naive Bayes fit | shared | 4 | 0 | 32 GB | ~1 h |
 | 05 | Posterior network | gpu (see script) | 8 | 1×GPU | 64 GB | 6–24 h |
 | 04 (ens.) | CFM ensemble member | gpu-shared | 10 | 1×V100 | 96 GB | 24 h (×K) |
 | 05 (ens.) | Posterior ensemble | gpu | 8 | 1×GPU | 64 GB | 6–24 h (×K) |
+| 00 (heatmaps) | Grid rate heatmaps | shared | 4 | — | 16 GB | 1 h |
+| 00 (R(z)) | Rate vs redshift | shared | 4 | — | 32 GB | 2 h |
 | 06a | Distribution analysis | shared | 4 | — | 32 GB | 8 h |
 | 02b | Data validation (full) | shared | 4 | — | 64 GB | 4 h |
 | 06 | Population figures | shared | 4 | — | 32 GB | 4 h |
 | 07 | GWTC validate | shared | 4 | — | 16 GB | 2 h |
+| 07b | Synth vs real GW | shared | 4 | — | 16 GB | 2 h |
+| 08 | GWTC-4 validation figs | shared | 4 | — | 32 GB | 8 h |
+| 09 | Fig2 spread / emulator m₁ | shared | 4 | — | 32 GB | 4 h |
+| 04 plots | CFM / diff / NB plot suites | gpu-shared | 4–10 | 0–1 | 32–96 GB | 1–4 h |
 
 All GPU jobs use `gpu-shared` (not exclusive), saving allocation.
 
@@ -249,8 +269,13 @@ python scripts/04_cfm_emulator.py --smoke-test --steps 500
 # optional second emulator for comparison, not both required for Step 5 in one go:
 # python scripts/04b_diffusion_emulator.py --smoke-test --steps 500
 
+# Optional baseline (CPU, seconds if 02 artifacts exist):
+python scripts/04c_naive_bayes_emulator.py
+
 # Posterior: trains on **synthetic catalogs** from the frozen CFM (or diffusion, see --emulator)
 python scripts/05_posterior_network.py --emulator cfm --model lite --epochs 10 --device cpu --batch-size 4 --n-max-events 32
+# ablation with NB baseline:
+# python scripts/05_posterior_network.py --emulator naive_bayes --model lite --epochs 10 --device cpu --batch-size 4 --n-max-events 32
 
 # Smoke test for posterior modules only
 python test/test_posterior_network.py
@@ -272,11 +297,14 @@ python test/test_ensemble_posterior.py
 | 03 | `python scripts/03_rate_network.py --epochs 200` | `slurm/03_rate_network.sh` |
 | 04 | `python scripts/04_cfm_emulator.py --smoke-test --steps 500 --device cpu` | `slurm/04_cfm.sh` |
 | 04b | `python scripts/04b_diffusion_emulator.py --smoke-test --steps 500` | `slurm/04b_diffusion.sh` |
+| 04c | `python scripts/04c_naive_bayes_emulator.py` | `slurm/04c_naive_bayes.sh` |
 | 04 ensemble | `bash scripts/train_cfm_ensemble.sh 3` (tune `EXTRA_ARGS`) | `slurm/04_cfm_ensemble.sh` |
 | 05 | `python scripts/05_posterior_network.py --model lite --epochs 10 --device cpu` | `slurm/05_posterior_network.sh` |
 | 05 ensemble | `bash scripts/train_posterior_ensemble.sh` | `slurm/05_posterior_ensemble.sh` |
 | 00 distribution | `python scripts/analysis/00_distribution_compare.py` | `slurm/06a_distribution_analysis.sh` |
 | 00 grid heatmaps | `python scripts/analysis/00_grid_rate_heatmaps.py` | `slurm/00_grid_rate_heatmaps.sh` |
+| 00 R(z) curves | `python scripts/analysis/00_rate_vs_redshift.py --vary sfra` | `slurm/00_rate_vs_redshift.sh` |
+| 00 fixed nuisances | `python scripts/00_sspc_data_generation.py --fixed-nuisance-tng100 …` | `SSPC_EXTRA=… sbatch slurm/00_data_gen.sh` |
 | 00 population | `python scripts/analysis/00_population_figures.py` | `slurm/06_population_figures.sh` |
 | 05 GWTC | `python scripts/analysis/05_gwtc_validate.py --events-csv data/gwtc_sample_events.csv` | `slurm/07_gwtc_validate.sh` |
 | 05 ensemble infer | `python scripts/analysis/05_ensemble_infer.py --synthetic-bag --member-dirs …` | Usually local |
@@ -319,7 +347,7 @@ flowchart TB
 1. **00** — BPS + cosmic integration → `models_sspc.hdf5` (grid of intrinsic catalogs by channel and `(sfr_a, μ₀)` with nuisance draws).  
 2. **02** — Per-cell samples + Λ encoding + **train/val/test** + `obs_normalizer` + parquets for **emulator training** (and other analyses).  
 3. **03** — MLP: Λ (with channel) → log₁₀ per-grid **intrinsic** merger-rate total (`sum_weight`).  
-4. **04 *or* 04b** — **Train one** (or both for comparison) **generative** model on **02’s `all_events`** (intrinsic distribution); **save** `checkpoints/cfm_final.pt` or `diffusion_final.pt` (includes `lambda_*` column list + normalizer). **Step 5 does not use the parquets directly for its training loss**—it uses **fresh draws** from this checkpoint.  
+4. **04 *or* 04b** — **Train one** (or both for comparison) **generative** model on **02’s `all_events`** (intrinsic distribution); **save** `checkpoints/cfm_final.pt` or `diffusion_final.pt` (includes `lambda_*` column list + normalizer). **Step 5 does not use the parquets directly for its training loss**—it uses **fresh draws** from this checkpoint. Optional **04c** fits `naive_bayes_final.pt` (baseline, CPU).  
 5. **05** — **Transformer + flow**; each batch, **Λ** from 02, **synthetic** events = **emulator(Λ)** (frozen, **no** gradients into the generator); NLL to recover Λ. *Proposal alignment:* synthetic catalogs come **from the same CFM (or diffusion) you trained in 04/04b**, **after** 04/04b completes—not in parallel to skip them.  
 6. **06 (optional, post-train)** — **Forward** **intrinsic** figures from the SSPC HDF5 (rate–weight vs *z*, masses in *z* slices) for paper-ready definitions.  
 7. **07 (optional)** — **Validate** the posterior on a **GWTC-style CSV** (masses, spin, *z*); not full PE, not a skymap.
@@ -341,8 +369,17 @@ flowchart TB
 **Input:**
 - `data/bps_output.h5` — COMPAS/GROWL BPS simulation output (3.35M binaries) with columns: `m1`, `m2`, `t_delay`, `metallicity`, `channel` (SMT/CE/CHE).
 
-**Output:** `data/sspc/models_sspc.hdf5` — HDF5 file with keys `/CHANNEL/sfra{NNNN}/mu0{MMMM}`.  
-Each key contains a DataFrame with columns: `mchirp`, `q`, `chieff`, `z`, `weight`.
+**Output:** `data/sspc/models_sspc.hdf5` (default) or any path via `--output-hdf5`. HDF5 keys: `/CHANNEL/sfra{NNNN}/mu0{MMMM}` (e.g. `/SMT/sfra0170/mu00250`).
+
+Each key holds **50,000** sampled events (default `--n-events`) with columns:
+
+| Column | Meaning |
+|--------|---------|
+| `mchirp`, `q`, `z` | Source-frame chirp mass, mass ratio, merger redshift |
+| `weight` | Per-binary intrinsic merger-rate weight [merger/yr] (cosmic integration) |
+| `intrinsic_rate_yr` | Total intrinsic rate for this grid cell (sum over BPS before sampling) |
+| `rate_per_gpc3_yr` | `intrinsic_rate_yr / V_comov(z ≤ 10)` [Gpc⁻³ yr⁻¹] |
+| `sspc_sfr_a` … `sspc_alpha_skew` | SSPC parameters used for that cell |
 
 **Parameters scanned (centred on TNG100-1 best-fit values from Briel+):**
 
@@ -350,22 +387,54 @@ Each key contains a DataFrame with columns: `mchirp`, `q`, `chieff`, `z`, `weigh
 |-----------|--------|-------|-------------------|-----------|
 | SFR amplitude | `sfr_a` | 0.010 – 0.030 | ≈ 0.017 | **primary axis** |
 | Mean metallicity (z=0) | `mu0` | 0.010 – 0.060 | ≈ 0.025 | **primary axis** |
-| SFR rising slope | `sfr_b` | 1.0 – 3.0 | ≈ 1.46 | nuisance (random draw) |
-| SFR turnover redshift | `sfr_c` | 2.0 – 6.0 | ≈ 4.51 | nuisance |
-| SFR falling slope | `sfr_d` | 4.0 – 8.0 | ≈ 6.21 | nuisance |
+| SFR rising slope | `sfr_b` | 1.0 – 3.0 | ≈ 1.456 | nuisance |
+| SFR turnover redshift | `sfr_c` | 2.0 – 6.0 | ≈ 4.514 | nuisance |
+| SFR falling slope | `sfr_d` | 4.0 – 8.0 | ≈ 6.210 | nuisance |
 | Metallicity evo. slope | `muz` | −0.5 – 0.1 | ≈ −0.052 | nuisance |
-| Metallicity log-spread | `sigma0` | 0.5 – 1.5 | ≈ 1.15 | nuisance |
+| Metallicity log-spread | `sigma0` | 0.5 – 1.5 | ≈ 1.151 | nuisance |
 | Spread redshift evo. | `sigmaz` | −0.1 – 0.1 | ≈ 0.047 | nuisance |
-| Log-skew skewness | `alpha_skew` | −2.0 – 2.0 | ≈ −1.85 | nuisance |
+| Log-skew skewness | `alpha_skew` | −2.0 – 2.0 | ≈ −1.854 | nuisance |
 
-**Grid size:** `--n-sfra` × `--n-mu0` grid points × 3 channels (SMT, CE, CHE).  
-Full run: 50 × 50 × 3 = 7,500 grid points × 50,000 events ≈ 375M events total.
+**Grid size:** `--n-sfra` × `--n-mu0` × 3 channels (SMT, CE, CHE).  
+Production: **50 × 50 × 3 = 7,500** cells × **50,000** events ≈ **375M** stored mergers (~32 GB per full HDF5).
+
+**Nuisance handling (CLI):**
+
+| Mode | Flag | Behaviour |
+|------|------|-----------|
+| Default | *(none)* | Random draw of `sfr_b,c,d`, `muz`, `sigma0`, `sigmaz`, `alpha_skew` **per grid cell** |
+| TNG100 fixed | `--fixed-nuisance-tng100` | All seven nuisances fixed to TNG100-1 best-fit on every cell; only `sfr_a` and `mu0` vary |
+| Fixed merger z | `--fixed-z Z` | Every sampled event gets redshift `Z` (cosmic weights still integrate over all z) |
+
+**Example — fixed nuisances, custom output (still under `data/sspc/`):**
+
+```bash
+python scripts/00_sspc_data_generation.py \
+  --n-sfra 50 --n-mu0 50 --n-events 50000 \
+  --fixed-nuisance-tng100 \
+  --output-hdf5 data/sspc/models_sspc_fixed_nuisance.hdf5 \
+  --overwrite
+```
+
+**SLURM:** `SSPC_EXTRA='--fixed-nuisance-tng100 --output-hdf5 data/sspc/models_sspc_fixed_nuisance.hdf5' sbatch slurm/00_data_gen.sh`
+
+**Step 02 on a non-default HDF5** (isolated under `data/ml_20x20_z02/`, including its own `checkpoints/obs_normalizer.json`):
+
+```bash
+HDF5=data/sspc/models_sspc_20x20_z02_fixed_nuisance.hdf5 OUT_DIR=data/ml_20x20_z02 sbatch slurm/02_build_dataset.sh
+```
+
+**Example — 20×20, fixed nuisances, events at z = 0.2:**
+
+```bash
+SSPC_EXTRA='--n-sfra 20 --n-mu0 20 --fixed-nuisance-tng100 --fixed-z 0.2 --output-hdf5 data/sspc/models_sspc_20x20_z02_fixed_nuisance.hdf5' \
+  sbatch slurm/00_data_gen.sh
+```
 
 **Key design:**
-- Events are sampled from the **intrinsic merger-rate distribution** (no pdet cut). All mergers across all redshifts z = 0.1 – 10 are included, weighted by the physical merger rate at each redshift.
-- `weight` column = per-binary intrinsic merger rate [merger/yr/binary] at the drawn z.
-- `z` values clipped to ≥ 0.1 to avoid log10(0) issues.
-- `chieff` drawn from channel-dependent Gaussians (no spin info in BPS): CE ~ N(0, 0.10), CHE ~ N(0.25, 0.15), SMT ~ N(0.05, 0.12).
+- Cosmic integration: per-binary weight = Σ_z `feff × SFR(z_form) × dP(metallicity) × ΔV_comov` (Madau–Dickinson + Neijssel+19-style metallicity; see script docstring).
+- Events sampled from the **intrinsic** merger-rate distribution (no detection probability).
+- `chieff` is **not** in current BPS output; spins are assigned in downstream steps if needed.
 
 ---
 
@@ -453,6 +522,25 @@ python 03_rate_network.py --epochs 2000 --patience 200 --checkpoint-dir checkpoi
 
 ---
 
+### Step 04c — Naive Bayes Emulator (`04c_naive_bayes_emulator.py`)
+
+**In plain English:** The simplest baseline for “given universe-settings, draw mergers.” It does **not** train a neural network. Instead it reads the same Step 02 tables and stores **per-grid statistics** (means and spreads of mass, mass ratio, and redshift). At inference it either **mixes** nearby grid cells with a Gaussian kernel (`mode=gaussian`, default) or **resamples** events from the closest grid row (`mode=nearest`). Use this to see how much CFM/diffusion improve over a classical shortcut.
+
+**What it does (technical):** Fits `NaiveBayesEmulator` from `all_events.parquet` + `hyperparam_table_encoded.csv`: per `grid_idx`, diagonal Gaussian in normalized (mchirp, q, z) space; Λ-kernel weights π_g(Λ) ∝ exp(−‖Λ−Λ_g‖²/2τ²). No gradients; runtime fit is seconds on CPU.
+
+**Input:** Same as Step 04 (`all_events.parquet`, `hyperparam_table_encoded.csv`, `checkpoints/obs_normalizer.json`).
+
+**CLI:**
+
+```bash
+python scripts/04c_naive_bayes_emulator.py
+python scripts/04c_naive_bayes_emulator.py --mode nearest --bandwidth 0.05
+```
+
+**Output:** `checkpoints/naive_bayes_final.pt`, validation plots in `plots/04c_naive_bayes_emulator/<timestamp>/`.
+
+---
+
 ### Step 05 — Posterior network (`05_posterior_network.py`)
 
 **In plain English — what this step is for**
@@ -536,8 +624,8 @@ python 05_posterior_network.py \
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--emulator` | `cfm` | `cfm` or `diffusion` — which 04/04b checkpoint to load. |
-| `--emulator-checkpoint` | `checkpoints/cfm_final.pt` or `diffusion_final.pt` | Path to 04/04b **final** save (contains `model_state`, `normalizer`, `lambda_cols`). |
+| `--emulator` | `cfm` | `cfm`, `diffusion`, or `naive_bayes` — which generative checkpoint to load. |
+| `--emulator-checkpoint` | `checkpoints/cfm_final.pt`, `diffusion_final.pt`, or `naive_bayes_final.pt` | Path to 04/04b/04c **final** save (contains `model_state`, `normalizer`, `lambda_cols`). |
 | `--model` | `lite` | `lite` or `full` (posterior). |
 | `--epochs` | 200 | Max training epochs. |
 | `--patience` | 30 | Early stopping on val NLL. |
@@ -569,10 +657,14 @@ Full index: [`scripts/analysis/README.md`](scripts/analysis/README.md).
 | `00_population_figures.py` | 00 | Rate vs *z*, *m*₁/*m*₂/*q* → `plots/00_population_figures/<timestamp>/` |
 | `00_distribution_compare.py` | 00 | TNG vs SSPC Figure 5 + merger-rate vs *z* → `plots/00_distribution_compare/<timestamp>/` |
 | `00_fig2_spread.py` | 00 | Figure-2-style SSPC mass marginals → `plots/00_fig2_spread/<timestamp>/` |
-| `00_grid_rate_heatmaps.py` | 00 | (sfr_a, mu0) heatmaps → `plots/00_grid_rate_heatmaps/<timestamp>/` |
+| `00_grid_rate_heatmaps.py` | 00 | Intrinsic rate density heatmaps on (`sfr_a`, `mu0`) per channel → `plots/00_grid_rate_heatmaps/<timestamp>/` |
+| `00_rate_vs_redshift.py` | 00 | *R(z)* for several `sfr_a` or `mu0` values (TNG100-fixed nuisances; recomputes integration) → `plots/00_rate_vs_redshift/<timestamp>/` |
 | `02_validation.py` | 02 | Intrinsic QA → reports `test/reports/validation/<timestamp>/`, plots `plots/02_validation/<timestamp>/` |
-| `04_emulator_m1_compare.py` | 04/04b | CFM vs diffusion *m*₁ → `plots/04_emulator_m1_compare/<timestamp>/` |
-| `04_gwtc4_validation.py` | 04 | GWTC-4 paper figures → `plots/04_gwtc4_validation/<timestamp>/` |
+| `04_cfm_emulator_plots.py` | 04 | Full CFM validation plots from `cfm_final.pt` |
+| `04b_diffusion_emulator_plots.py` | 04b | Full diffusion validation plots from `diffusion_final.pt` |
+| `04c_naive_bayes_emulator_plots.py` | 04c | NB marginal / KDE plots from `naive_bayes_final.pt` |
+| `04_emulator_m1_compare.py` | 04/04b/04c | CFM vs diffusion vs optional NB *m*₁ → `plots/04_emulator_m1_compare/<timestamp>/` |
+| `04_gwtc4_validation.py` | 04 | GWTC-4 paper figures; optional `--naive-bayes-checkpoint` saves NB grids → `plots/04_gwtc4_validation/<timestamp>/` |
 | `05_gwtc_validate.py` | 05 | Event CSV → posterior marginals → `plots/05_gwtc_validate/<timestamp>/` |
 | `05_synth_real_compare.py` | 05 | Emulator synthetic catalog vs real GW CSV (overlay marginals) |
 | `05_ensemble_infer.py` | 05 | *K* posteriors: log-mean density and/or mixture samples |
@@ -582,13 +674,27 @@ Full index: [`scripts/analysis/README.md`](scripts/analysis/README.md).
 
 ```bash
 python scripts/analysis/02_validation.py
+
+# Step 00 HDF5 diagnostics (default: data/sspc/models_sspc.hdf5)
 python scripts/analysis/00_grid_rate_heatmaps.py --metric rate
+python scripts/analysis/00_grid_rate_heatmaps.py \
+  --sspc-hdf5 data/sspc/models_sspc_fixed_nuisance.hdf5 \
+  --color-scale linear --average-over mu0
+
+python scripts/analysis/00_rate_vs_redshift.py --vary sfra --log-y
+python scripts/analysis/00_rate_vs_redshift.py --vary mu0 --n-curves 7
+
 python scripts/analysis/00_distribution_compare.py --sspc-hdf5 data/sspc/models_sspc.hdf5
 python scripts/analysis/00_population_figures.py --z-slices 0.2 1.0
+python scripts/analysis/04_cfm_emulator_plots.py
 python scripts/analysis/04_emulator_m1_compare.py --device cuda
 python scripts/analysis/05_gwtc_validate.py --events-csv data/gwtc_sample_events.csv --emulator cfm
 python scripts/analysis/05_ensemble_infer.py --synthetic-bag --member-dirs checkpoints/posterior_ensemble/1 checkpoints/posterior_ensemble/2
 ```
+
+**`00_grid_rate_heatmaps.py` options:** `--sspc-hdf5`, `--hyperparam-csv` (Step 02 table, not recommended for intrinsic rate), `--metric {rate,count,log_rate,rate_weight}`, `--color-scale {log,linear}`, `--colormap {sequential,diverging}`, `--average-over {none,mu0,sfra}`, `--linear-scale` (alias for linear).
+
+**`00_rate_vs_redshift.py`:** `--vary {sfra,mu0}` (required), `--n-curves`, `--values`, `--sspc-hdf5` (curve locations from keys), `--log-y`, `--channels SMT CE CHE`.
 
 `test/validation/run_data_validation.py` is a thin wrapper that calls `02_validation.py`.
 
@@ -596,88 +702,128 @@ python scripts/analysis/05_ensemble_infer.py --synthetic-bag --member-dirs check
 
 ---
 
-## File structure
+## Repository layout
 
-**Plain language:** this is a **map of filenames**—not something to memorize. The **numbered scripts** (`00`, `02`, …) are the **main story in order**; `models/` holds the **building blocks** for the neural networks; `slurm/` holds **cluster job recipes**; `data/` is where the **heavy scientific input** lives; `checkpoints/` is where **trained weights** get saved so you do not have to re-train from scratch.
+**Plain language:** numbered **`scripts/0*.py`** are the training pipeline in order; **`scripts/analysis/`** is diagnostics and paper figures; **`slurm/`** submits those scripts on Expanse; **`data/`** holds inputs and large HDF5 catalogs; **`checkpoints/`** and **`plots/`** hold trained weights and figures. Path helpers live in **`plant_paths.py`**.
 
-```
-PLANT_GW_Paleontology/
-├── plant_paths.py               # PROJECT_ROOT, data/ ML paths, checkpoints/
-├── scripts/
-│   ├── 00_sspc_data_generation.py
-│   ├── 02_build_dataset.py
-│   ├── 03_rate_network.py
-│   ├── 04_cfm_emulator.py
-│   ├── 04b_diffusion_emulator.py
-│   ├── 05_posterior_network.py
-│   ├── train_cfm_ensemble.sh
-│   ├── train_posterior_ensemble.sh
-│   └── analysis/                # Diagnostics & figures (see analysis/README.md)
-│       ├── 00_population_figures.py
-│       ├── 00_distribution_compare.py
-│       ├── 00_fig2_spread.py
-│       ├── 00_grid_rate_heatmaps.py
-│       ├── 02_validation.py
-│       ├── 04_emulator_m1_compare.py
-│       ├── 04_gwtc4_validation.py
-│       ├── 05_gwtc_validate.py
-│       ├── 05_synth_real_compare.py
-│       ├── 05_ensemble_infer.py
-│       ├── lib/distribution.py  # shared TNG/SSPC / emulator plot helpers
-│       └── utils/
-│           ├── fetch_gwtc40_events.py
-│           └── selection_effects.py
-├── models/
-│   ├── rate_network.py
-│   ├── cfm_emulator.py
-│   ├── diffusion_emulator.py
-│   ├── ensemble_posterior.py
-│   ├── posterior_network_lite.py
-│   └── posterior_network_full.py
-├── data/                        # Step-02 tables + SSPC HDF5 (see plant_paths.py)
-├── test/
-│   ├── test_posterior_network.py
-│   ├── test_ensemble_posterior.py
-│   ├── validation/run_data_validation.py  # → scripts/analysis/02_validation.py
-│   └── reports/validation/
-├── requirements.txt
-├── requirements-optional.txt  # e.g. sbi (not used by core pipeline scripts)
-├── slurm/
-│   ├── 00_data_gen.sh
-│   ├── 02_build_dataset.sh
-│   ├── 02b_data_validation.sh
-│   ├── 03_rate_network.sh
-│   ├── 04_cfm.sh
-│   ├── 04b_diffusion.sh
-│   ├── 04_cfm_ensemble.sh
-│   ├── 05_posterior_network.sh   # GPU full-model training (tune for site)
-│   ├── 05_posterior_ensemble.sh
-│   ├── 06_population_figures.sh
-│   ├── 06a_distribution_analysis.sh
-│   ├── 07_gwtc_validate.sh
-│   └── smoke_test.sh
-├── data/
-│   ├── bps_output.h5              # BPS input (COMPAS/GROWL)
-│   └── sspc/
-│       └── models_sspc.hdf5      # generated event catalogs (00)
-├── checkpoints/                   # (also written in CWD when running 02/03/05)
-│   ├── obs_normalizer.json       # from 02; read by 04, 05
-│   ├── rate_network_best.pt
-│   ├── rate_network_config.json
-│   ├── gp_rate_baseline.pkl
-│   ├── cfm_*.pt / diffusion_*.pt # naming depends on 04/04b training mode
-│   ├── posterior_network_best.pt
-│   └── posterior_network_config.json
-└── plots/                         # plots/<script_stem>/<timestamp>/ per run
-    ├── 03_rate_network/
-    ├── 04_cfm_emulator/
-    ├── 04b_diffusion_emulator/
-    ├── 05_posterior_network/
-    ├── 00_distribution_compare/
-    ├── 00_population_figures/
-    ├── 02_validation/
-    └── …                          # one folder per plotting script
-```
+### Top level
+
+| Path | Purpose |
+|------|---------|
+| `README.md` | This document |
+| `plant_paths.py` | `PROJECT_ROOT`, `data/` ML paths, `plots/<script_stem>/<timestamp>/` helpers |
+| `requirements.txt` | Core Python dependencies (PyTorch, pandas, torchcfm, …) |
+| `requirements-optional.txt` | Optional extras (e.g. `sbi`) |
+| `.venv311/` | Local venv (optional; Expanse often uses conda `plant`) |
+
+### Pipeline scripts (`scripts/`)
+
+| Script | Step | Role |
+|--------|------|------|
+| `00_sspc_data_generation.py` | 00 | BPS + cosmic integration → SSPC HDF5 grid |
+| `02_build_dataset.py` | 02 | HDF5 → parquets, CSVs, splits, `obs_normalizer.json` |
+| `03_rate_network.py` | 03 | MLP: Λ → log₁₀ intrinsic rate per grid cell |
+| `04_cfm_emulator.py` | 04 | Conditional flow matching emulator |
+| `04b_diffusion_emulator.py` | 04b | Diffusion emulator (alternative to 04) |
+| `04c_naive_bayes_emulator.py` | 04c | Naive Bayes baseline emulator |
+| `05_posterior_network.py` | 05 | Set transformer + flow: catalog → Λ |
+| `train_cfm_ensemble.sh` | — | Shell helper for *K* CFM seeds |
+| `train_posterior_ensemble.sh` | — | Shell helper for *K* posterior seeds |
+
+### Analysis (`scripts/analysis/`)
+
+See [`scripts/analysis/README.md`](scripts/analysis/README.md). Summary:
+
+| Script | Step |
+|--------|------|
+| `00_population_figures.py`, `00_distribution_compare.py`, `00_fig2_spread.py` | 00 population / paper figures |
+| `00_grid_rate_heatmaps.py`, `00_rate_vs_redshift.py` | 00 grid diagnostics |
+| `02_validation.py` | 02 data QA |
+| `04_cfm_emulator_plots.py`, `04b_diffusion_emulator_plots.py`, `04c_naive_bayes_emulator_plots.py` | 04 emulator validation plots |
+| `04_emulator_m1_compare.py`, `04_gwtc4_validation.py` | 04 comparisons / GWTC-4 figs |
+| `05_gwtc_validate.py`, `05_synth_real_compare.py`, `05_ensemble_infer.py` | 05 inference / ensemble |
+| `lib/distribution.py`, `lib/generative_emulator_plots.py`, … | Shared plotting loaders |
+| `utils/fetch_gwtc40_events.py`, `utils/selection_effects.py` | GWOSC fetch, selection helpers |
+
+### Models (`models/`)
+
+| Module | Used by |
+|--------|---------|
+| `rate_network.py` | Step 03 |
+| `cfm_emulator.py` | Step 04 |
+| `diffusion_emulator.py` | Step 04b |
+| `naive_bayes_emulator.py` | Step 04c |
+| `posterior_network_lite.py`, `posterior_network_full.py` | Step 05 |
+| `ensemble_posterior.py` | `05_ensemble_infer.py` |
+
+### Data (`data/`)
+
+| File / dir | Produced by | Notes |
+|------------|-------------|--------|
+| `bps_output.h5` | External (COMPAS/GROWL) | ~3.35M DCO binaries; required for 00 |
+| `sspc/models_sspc.hdf5` | Step 00 (default) | 50×50×3 grid; random nuisance per cell |
+| `sspc/models_sspc_fixed_nuisance.hdf5` | Step 00 + `--fixed-nuisance-tng100` | Same grid; TNG100-fixed nuisances |
+| `hyperparam_table.csv`, `hyperparam_table_encoded.csv` | Step 02 | Per-cell aggregates + encoded Λ |
+| `all_events.parquet`, `all_detected_events.parquet` | Step 02 | Training tables for 04/05 |
+| `splits.json` | Step 02 | Train/val/test indices |
+| `gwtc_sample_events.csv` | Manual / utils | Small catalog for 05 smoke tests |
+
+Step 02 also writes `checkpoints/obs_normalizer.json` (under project root when run from `PLANT_GW_Paleontology/`).
+
+### Checkpoints (`checkpoints/`)
+
+| Artifact | Step |
+|----------|------|
+| `obs_normalizer.json` | 02 |
+| `rate_network_best.pt`, `rate_network_config.json`, `gp_rate_baseline.pkl` | 03 |
+| `cfm_final.pt`, `diffusion_final.pt`, `naive_bayes_final.pt` | 04 / 04b / 04c |
+| `posterior_network_best.pt`, `posterior_network_config.json` | 05 |
+| `ensemble_cfm/`, `posterior_ensemble/` | Optional ensemble runs |
+
+### Plots (`plots/`)
+
+Timestamped subfolders per script: `plots/<script_stem>/<YYYY-MM-DD_HH-MM-SS>/`. Examples: `00_grid_rate_heatmaps/`, `00_rate_vs_redshift/`, `03_rate_network/`, `04_cfm_emulator/`, `05_posterior_network/`, `02_validation/`.
+
+### Tests (`test/`)
+
+| Path | Purpose |
+|------|---------|
+| `test_posterior_network.py` | Unit tests for posterior modules |
+| `test_ensemble_posterior.py` | Ensemble combination tests |
+| `validation/run_data_validation.py` | Wrapper → `02_validation.py` |
+| `reports/validation/` | JSON/text reports from 02 validation |
+
+### SLURM (`slurm/`)
+
+All jobs assume `conda activate plant` and `#SBATCH --account=sdp153` unless you edit the scripts.
+
+| Script | Runs |
+|--------|------|
+| `00_data_gen.sh` | Step 00 (`SSPC_EXTRA` for extra CLI flags) |
+| `02_build_dataset.sh` | Step 02 |
+| `03_rate_network.sh` | Step 03 |
+| `04_cfm.sh`, `04b_diffusion.sh`, `04c_naive_bayes.sh` | Steps 04 / 04b / 04c |
+| `04_cfm_ensemble.sh`, `05_posterior_ensemble.sh` | Ensemble training |
+| `05_posterior_network.sh` | Step 05 |
+| `00_grid_rate_heatmaps.sh` | Grid heatmaps (`SSPC_HDF5`, `EXTRA`) |
+| `00_rate_vs_redshift.sh` | *R(z)* curves (`VARY=sfra` or `mu0`, `EXTRA`) |
+| `02b_data_validation.sh` | Step 02 validation |
+| `06_population_figures.sh`, `06a_distribution_analysis.sh`, `09_fig2_spread.sh` | Step 00 figures |
+| `04_cfm_emulator_plots.sh`, `04b_diffusion_emulator_plots.sh`, `04c_naive_bayes_emulator_plots.sh` | Emulator plot suites |
+| `07_gwtc_validate.sh`, `07b_synth_real_validation.sh` | Step 05 GW validation |
+| `08_gwtc4_validation.sh`, `08_smoke_gwtc4_fig2.sh` | GWTC-4 / smoke figs |
+| `09_emulator_m1_distribution.sh` | Emulator *m*₁ comparison |
+| `05_ensemble_infer.sh` | Ensemble inference |
+| `utils_fetch_gwtc40_events.sh` | Download GWTC-4 CSV |
+| `smoke_test.sh` | Short GPU sanity check |
+
+### Logs
+
+`logs/<job_script_stem>.<jobid>.out` and `.err` from SLURM.
+
+### External dependency
+
+**`syntheticstellarpopconvolve`** (Hendriks et al.) — Madau–Dickinson SFR and COMPAS metallicity distributions for Step 00. Install per project setup (often from parent repo / `REPO_ROOT` in `plant_paths.py`).
 
 ---
 
@@ -685,7 +831,7 @@ PLANT_GW_Paleontology/
 
 **In plain English:** *Why do we care about CPU vs GPU?* The **math-heavy** training (Steps 04–05 *full*) is much faster on a **GPU** (a card good at huge parallel matrix work). **Steps 00–03** are usually run on ordinary **CPU** nodes. *What is a checkpoint?* A **saved snapshot** of the learned numbers inside the neural networks so you can **stop and resume**, or **share** results with a collaborator without them re-running training.
 
-- **CPU vs GPU:** Steps 00–03 are typically CPU. Steps 04/04b and **05** (full) are best on **GPU** (05 repeatedly calls the frozen emulator’s sampler). **Order:** finish **one** of 04/04b **before** 05; Step 05 is **not** a substitute for 04/04b.
+- **CPU vs GPU:** Steps 00–03 and **04c** are typically CPU. Steps 04/04b and **05** (full) are best on **GPU** (05 repeatedly calls the frozen emulator’s sampler). **Order:** finish **one** of 04/04b **before** 05 for the main path; **04c** is optional and can run anytime after 02.
 - **Lustre constraint:** On Expanse, add `#SBATCH --constraint="lustre"` to any script if you place data on `/expanse/lustre/scratch` (Lustre is a **shared file system** tuned for large parallel reads—only relevant if your site uses it).
 - **SLURM account:** Scripts use **`#SBATCH --account=sdp153`**, matching the **PROJECT** field from `expanse-client user` (not the TG id **TG-PHY260100** by itself). If your allocation row shows a different PROJECT name, substitute that in every `slurm/*.sh`.
 - **Checkpoint loading (technical):** e.g. `torch.load("checkpoints/cfm_final.pt", weights_only=False)`; posterior weights are in `checkpoints/posterior_network_best.pt` under the key `state_dict`, with Λ normalisation and column order in `posterior_network_config.json`.
